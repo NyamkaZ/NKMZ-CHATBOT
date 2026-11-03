@@ -1,0 +1,193 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 222 28% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 28% 12%;
+    --primary: 166 72% 32%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 18% 94%;
+    --secondary-foreground: 222 28% 16%;
+    --muted: 210 16% 94%;
+    --muted-foreground: 215 14% 42%;
+    --accent: 168 35% 94%;
+    --accent-foreground: 166 55% 22%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 214 18% 88%;
+    --input: 214 18% 88%;
+    --ring: 166 72% 32%;
+    --radius: 0.75rem;
+    --sidebar: 210 22% 96%;
+    --sidebar-foreground: 222 20% 22%;
+    --brand: 166 72% 32%;
+    --glow: 168 60% 45%;
+  }
+
+  .dark {
+    --background: 222 28% 7%;
+    --foreground: 210 20% 96%;
+    --card: 222 24% 9%;
+    --card-foreground: 210 20% 96%;
+    --primary: 166 65% 42%;
+    --primary-foreground: 166 80% 6%;
+    --secondary: 222 18% 14%;
+    --secondary-foreground: 210 20% 96%;
+    --muted: 222 16% 13%;
+    --muted-foreground: 215 12% 62%;
+    --accent: 168 28% 14%;
+    --accent-foreground: 166 50% 78%;
+    --destructive: 0 62% 42%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 222 16% 16%;
+    --input: 222 16% 16%;
+    --ring: 166 65% 42%;
+    --sidebar: 222 26% 8%;
+    --sidebar-foreground: 210 18% 92%;
+    --brand: 166 65% 42%;
+    --glow: 168 55% 40%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "ss01" 1, "cv11" 1;
+    overscroll-behavior: none;
+  }
+}
+
+@supports (padding: max(0px)) {
+  body {
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+}
+
+/* Ambient mesh behind the chat shell */
+.chat-atmosphere {
+  background:
+    radial-gradient(ellipse 80% 50% at 20% -10%, hsl(var(--glow) / 0.12), transparent 55%),
+    radial-gradient(ellipse 70% 45% at 90% 10%, hsl(210 60% 50% / 0.08), transparent 50%),
+    radial-gradient(ellipse 60% 40% at 50% 100%, hsl(var(--glow) / 0.06), transparent 55%),
+    hsl(var(--background));
+}
+
+.dark .chat-atmosphere {
+  background:
+    radial-gradient(ellipse 80% 50% at 15% -5%, hsl(var(--glow) / 0.14), transparent 55%),
+    radial-gradient(ellipse 70% 45% at 95% 5%, hsl(220 50% 40% / 0.1), transparent 50%),
+    radial-gradient(ellipse 55% 35% at 50% 110%, hsl(var(--glow) / 0.08), transparent 55%),
+    hsl(var(--background));
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.28);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.45);
+}
+
+.thinking-dots span {
+  animation: thinking-dot 1.4s infinite ease-in-out both;
+}
+.thinking-dots span:nth-child(1) {
+  animation-delay: -0.32s;
+}
+.thinking-dots span:nth-child(2) {
+  animation-delay: -0.16s;
+}
+@keyframes thinking-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.2;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes soft-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.45s ease-out both;
+}
+
+.animate-soft-pulse {
+  animation: soft-pulse 2.4s ease-in-out infinite;
+}
+
+.hint-stagger > *:nth-child(1) {
+  animation-delay: 0.05s;
+}
+.hint-stagger > *:nth-child(2) {
+  animation-delay: 0.12s;
+}
+.hint-stagger > *:nth-child(3) {
+  animation-delay: 0.19s;
+}
+.hint-stagger > *:nth-child(4) {
+  animation-delay: 0.26s;
+}
+
+.brand-shimmer {
+  background: linear-gradient(
+    90deg,
+    hsl(var(--foreground)) 0%,
+    hsl(var(--brand)) 40%,
+    hsl(var(--foreground)) 80%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 6s ease-in-out infinite;
+}

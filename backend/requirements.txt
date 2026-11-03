@@ -1,0 +1,58 @@
+# Core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+pydantic==2.10.4
+pydantic-settings==2.7.0
+email-validator==2.2.0
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+psycopg2-binary==2.9.10
+
+# Redis & caching
+redis==5.2.1
+aioredis==2.0.1
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.1
+
+# Payments
+stripe==11.4.0
+
+# HTTP & LLM
+httpx==0.28.1
+openai==1.58.1  # compatible client for some providers
+tiktoken==0.8.0
+
+# RAG / embeddings
+chromadb==0.5.23
+sentence-transformers==3.3.1
+pypdf==5.1.0
+# or use ollama embeddings if preferred
+
+# Background tasks (simple asyncio + redis for this project)
+# For production scale: celery[redis]==5.4.1 or arq
+
+# Utils
+python-dotenv==1.0.1
+tenacity==9.0.0
+orjson==3.10.12
+aiofiles==24.1.0
+uuid6==2024.7.10
+
+# Bots
+python-telegram-bot==21.9
+discord.py==2.4.0
+
+# Logging & monitoring
+structlog==24.4.0
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1
