@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated, List, Optional
 from uuid import UUID
 
@@ -32,6 +33,7 @@ from app.services.generation import (
     start_generation_task,
     request_stop,
     get_generation_state,
+    clear_active_generation,
 )
 from app.services.llm.ollama import ollama_service
 import structlog
@@ -220,26 +222,13 @@ async def send_message(
         db.add(chat)
         await db.flush()
 
-    # Clear any stale generation lock so send never freezes
+    # One message at a time per chat: reject the new send instead of
+    # starting a second competing generation task on the same chat.
     if await is_generation_active(str(chat.id)):
-        from app.services.generation import clear_active_generation
-        await clear_active_generation(str(chat.id))
-        try:
-            from sqlalchemy import update as sa_update
-            await db.execute(
-                sa_update(Message)
-                .where(
-                    Message.chat_id == chat.id,
-                    Message.status.in_([MessageStatus.THINKING, MessageStatus.STREAMING]),
-                )
-                .values(
-                    status=MessageStatus.FAILED,
-                    error_message="Generation interrupted — please retry",
-                )
-            )
-            await db.commit()
-        except Exception:
-            await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Энэ чат дээр хариу үүсэж байна. Дуусахыг хүлээнэ үү.",
+        )
 
     # Create user message
     user_msg = Message(
@@ -266,7 +255,8 @@ async def send_message(
 
     # Mark chat as having active generation
     await set_active_generation(str(chat.id), generation_id)
-    chat.updated_at = user_msg.created_at
+    # A freshly flushed user_msg may not have created_at populated yet.
+    chat.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(user_msg)
     await db.refresh(assistant_msg)
@@ -483,41 +473,37 @@ async def regenerate(
     if not chat or (chat.user_id != user.id and chat.guest_id != user.guest_id):
         raise HTTPException(404, "Chat not found")
 
+    if await is_generation_active(str(chat.id)):
+        raise HTTPException(
+            status_code=409,
+            detail="Энэ чат дээр хариу үүсэж байна. Дуусахыг хүлээнэ үү.",
+        )
+
     # Find the target assistant message
     target = None
-    for m in chat.messages:
-        if m.id == message_id and m.role == MessageRole.ASSISTANT:
+    for m in sorted(chat.messages, key=lambda x: x.created_at):
+        if m.id == message_id:
             target = m
             break
-    if not target:
+    if not target or target.role != MessageRole.ASSISTANT:
         raise HTTPException(404, "Assistant message not found")
 
-    # Find the preceding user message
+    # Find the user message that produced it
     user_content = ""
-    for m in reversed(chat.messages):
-        if m.created_at < target.created_at and m.role == MessageRole.USER:
-            user_content = m.content
+    ordered = sorted(chat.messages, key=lambda x: x.created_at)
+    for i, m in enumerate(ordered):
+        if m.id == target.id:
+            for prev in reversed(ordered[:i]):
+                if prev.role == MessageRole.USER:
+                    user_content = prev.content
+                    break
             break
-    if not user_content:
-        raise HTTPException(400, "No preceding user message")
 
-    if await is_generation_active(str(chat.id)):
-        raise HTTPException(409, "Generation already in progress")
-
-    # Usage
-    allowed, used, limit, msg = await check_and_increment_usage(db, user)
-    if not allowed:
-        raise HTTPException(429, detail=msg)
-
-    # Reset the message
     generation_id = str(uuid.uuid4())
     target.content = ""
     target.status = MessageStatus.THINKING
     target.generation_id = generation_id
     target.error_message = None
-    await db.commit()
-    await db.refresh(target)
-
     await set_active_generation(str(chat.id), generation_id)
 
     # History up to (but not including) the target

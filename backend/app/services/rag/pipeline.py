@@ -15,6 +15,10 @@ from app.core.config import settings
 
 logger = structlog.get_logger()
 
+EMBED_BATCH_SIZE = 32
+KEYWORD_SCAN_LIMIT = 2000
+FAQ_MIN_OVERLAP = 2
+
 _chroma_client = None
 _collection = None
 
@@ -38,29 +42,35 @@ def _get_chroma():
 
 
 async def _embed_ollama(texts: List[str]) -> Optional[List[List[float]]]:
+    """Batch embed via /api/embed; fall back to legacy /api/embeddings one by one."""
     base = settings.OLLAMA_BASE_URL.rstrip("/")
     model = settings.OLLAMA_EMBED_MODEL
-    out: List[List[float]] = []
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
+            out: List[List[float]] = []
+            batch_ok = True
+            for i in range(0, len(texts), EMBED_BATCH_SIZE):
+                batch = texts[i : i + EMBED_BATCH_SIZE]
+                r = await client.post(f"{base}/api/embed", json={"model": model, "input": batch})
+                embs = r.json().get("embeddings") if r.status_code < 400 else None
+                if not embs or len(embs) != len(batch):
+                    batch_ok = False
+                    break
+                out.extend(embs)
+            if batch_ok:
+                return out
+
+            # Legacy Ollama (< 0.3): one request per text
+            out = []
             for text in texts:
-                for payload in (
-                    {"model": model, "input": text},
-                    {"model": model, "prompt": text},
-                ):
-                    r = await client.post(f"{base}/api/embeddings", json=payload)
-                    if r.status_code >= 400:
-                        continue
-                    data = r.json()
-                    emb = data.get("embedding")
-                    if not emb and isinstance(data.get("embeddings"), list) and data["embeddings"]:
-                        emb = data["embeddings"][0]
-                    if emb:
-                        out.append(emb)
-                        break
-                else:
+                r = await client.post(f"{base}/api/embeddings", json={"model": model, "prompt": text})
+                if r.status_code >= 400:
                     return None
-        return out
+                emb = r.json().get("embedding")
+                if not emb:
+                    return None
+                out.append(emb)
+            return out
     except Exception as e:
         logger.warning("ollama_embed_failed", error=str(e))
         return None
@@ -74,6 +84,21 @@ async def embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
 
 def chunk_text(text: str, chunk_size: int = 350, overlap: int = 40) -> List[str]:
     blocks = re.split(r"\n\s*\n", text.strip())
+    # A document without blank lines would otherwise become one huge block:
+    # fall back to single newlines, then sentences.
+    if len(blocks) == 1 and len(text.split()) > chunk_size:
+        blocks = [b for b in text.splitlines() if b.strip()]
+        if len(blocks) == 1:
+            blocks = re.split(r"(?<=[.!?])\s+", text.strip())
+        merged, buf = [], []
+        for blk in blocks:
+            if buf and len(" ".join(buf + [blk]).split()) > chunk_size:
+                merged.append(" ".join(buf))
+                buf = []
+            buf.append(blk.strip())
+        if buf:
+            merged.append(" ".join(buf))
+        blocks = merged
     chunks: List[str] = []
     for block in blocks:
         block = block.strip()
@@ -109,7 +134,7 @@ def _keyword_search(query: str, top_k: int) -> List[Dict[str, Any]]:
         _, collection = _get_chroma()
         if collection.count() == 0:
             return []
-        raw = collection.get(include=["documents", "metadatas"])
+        raw = collection.get(include=["documents", "metadatas"], limit=KEYWORD_SCAN_LIMIT)
         docs = raw.get("documents") or []
         metas = raw.get("metadatas") or []
         scored = []
@@ -243,7 +268,8 @@ def extract_faq_answer(hits, query: str = ""):
             best_ov = ov
             best_text = text
 
-    if not best_text or best_ov < 1:
+    # Require at least FAQ_MIN_OVERLAP shared words before skipping the LLM.
+    if not best_text or best_ov < FAQ_MIN_OVERLAP:
         return None
 
     # Хариулт: байвал түүнийг авна, байхгүй бол бүтэн chunk
