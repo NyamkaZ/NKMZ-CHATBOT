@@ -137,9 +137,12 @@ async def run_generation(
                 break
             full_content += token
             token_count += 1
-            await redis.rpush(f"{key}:tokens", token)
+            # rpush returns the new list length, so this token's index is
+            # length - 1. The SSE endpoint uses it to skip tokens that were
+            # already delivered in the catch-up payload.
+            length = await redis.rpush(f"{key}:tokens", token)
             await redis.expire(f"{key}:tokens", GEN_TTL_SECONDS)
-            await _publish(generation_id, "token", {"token": token})
+            await _publish(generation_id, "token", {"token": token, "index": length - 1})
 
         logger.info(
             "ollama_stream_finished",
