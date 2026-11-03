@@ -1,7 +1,8 @@
 """
 Server-Sent Events endpoint for generation progress.
 
-Supports reconnect: replays tokens already produced, then livesubscribes via Redis.
+Supports reconnect: subscribes first, replays tokens already produced, then
+streams live events from Redis (de-duplicated by token index).
 EventSource cannot set Authorization headers, so we also accept ?token= & ?guest_id=
 """
 
@@ -83,22 +84,27 @@ async def stream_generation(
             return StreamingResponse(finished(), media_type="text/event-stream")
 
     async def event_generator():
-        # 1. Replay
-        current = state or (await get_generation_state(generation_id))
-        if current:
-            tokens = current.get("tokens") or []
-            if tokens:
-                yield f"event: catchup\ndata: {json.dumps({'content': ''.join(tokens), 'status': current.get('status')})}\n\n"
-            status = current.get("status")
-            if status in ("completed", "stopped", "failed"):
-                yield f"event: done\ndata: {json.dumps({'status': status, 'content': current.get('content', ''), 'error': current.get('error')})}\n\n"
-                return
-
-        # 2. Live Redis pub/sub
+        # 1. Subscribe FIRST so no token published during replay is lost.
         pubsub = redis.pubsub()
         channel = f"{key}:channel"
         await pubsub.subscribe(channel)
+
         try:
+            # 2. Replay what already exists. Live token events carry an index;
+            #    anything below `replayed` is already in the catch-up payload.
+            replayed = 0
+            current = await get_generation_state(generation_id)
+            if current:
+                tokens = current.get("tokens") or []
+                replayed = len(tokens)
+                if tokens:
+                    yield f"event: catchup\ndata: {json.dumps({'content': ''.join(tokens), 'status': current.get('status')})}\n\n"
+                status = current.get("status")
+                if status in ("completed", "stopped", "failed"):
+                    yield f"event: done\ndata: {json.dumps({'status': status, 'content': current.get('content', ''), 'error': current.get('error')})}\n\n"
+                    return
+
+            # 3. Live
             idle_ticks = 0
             while True:
                 if await request.is_disconnected():
@@ -115,6 +121,12 @@ async def stream_generation(
                         payload = json.loads(raw)
                         event = payload.get("event", "message")
                         data = payload.get("data", {})
+                        if (
+                            event == "token"
+                            and isinstance(data.get("index"), int)
+                            and data["index"] < replayed
+                        ):
+                            continue  # already sent in catch-up
                         yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
                         if event in ("done", "stopped", "failed", "error"):
                             break

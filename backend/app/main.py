@@ -1,3 +1,4 @@
+import re
 from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI, Request
@@ -20,9 +21,31 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+IS_PRODUCTION = settings.ENVIRONMENT.lower() == "production"
+_DEV_ORIGIN_RE = re.compile(r"^http://(localhost|127\.0\.0\.1)(:\d+)?$")
+_ALLOWED_ORIGINS = set(settings.cors_origins_list) | (
+    set()
+    if IS_PRODUCTION
+    else {
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+    }
+)
+
+
+def _origin_allowed(origin: str) -> bool:
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    return not IS_PRODUCTION and bool(_DEV_ORIGIN_RE.match(origin))
+
+
 def _cors_headers(request: Request) -> dict:
-    origin = request.headers.get("origin") or "http://localhost:3000"
-    # Reflect request origin in dev so browser never blocks
+    origin = request.headers.get("origin") or ""
+    # Only echo origins we actually allow — never reflect arbitrary ones.
+    if not _origin_allowed(origin):
+        return {}
     return {
         "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Credentials": "true",
@@ -55,17 +78,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Broad CORS for local frontend (must be added before routes)
+# CORS: dev allows any localhost port; production only CORS_ORIGINS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        *settings.cors_origins_list,
-    ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origins=sorted(_ALLOWED_ORIGINS),
+    allow_origin_regex=None if IS_PRODUCTION else _DEV_ORIGIN_RE.pattern,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -97,7 +114,11 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("unhandled_exception", path=request.url.path, error=str(exc))
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal server error: {exc}"},
+        content={
+            "detail": "Internal server error"
+            if IS_PRODUCTION
+            else f"Internal server error: {exc}"
+        },
         headers=_cors_headers(request),
     )
 
@@ -107,7 +128,7 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 @app.options("/{full_path:path}")
 async def options_handler(full_path: str, request: Request):
-    """Ensure preflight always succeeds."""
+    """Ensure preflight always succeeds for allowed origins."""
     return JSONResponse(content={"ok": True}, headers=_cors_headers(request))
 
 

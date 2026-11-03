@@ -80,7 +80,7 @@ async def require_login_for_second_message(
 
     if user.is_guest or user.role == UserRole.GUEST:
         # Count total messages sent by this guest
-        from app.models.chat import Message, Chat
+        from app.models.chat import Message, Chat, MessageRole
         from sqlalchemy import func
 
         result = await db.execute(
@@ -88,7 +88,7 @@ async def require_login_for_second_message(
             .join(Chat, Message.chat_id == Chat.id)
             .where(
                 (Chat.guest_id == user.guest_id) | (Chat.user_id == user.id),
-                Message.role == "user",
+                Message.role == MessageRole.USER,
             )
         )
         msg_count = result.scalar() or 0
