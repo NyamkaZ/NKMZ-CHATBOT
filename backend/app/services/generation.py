@@ -24,6 +24,8 @@ logger = structlog.get_logger()
 _stop_flags: Dict[str, asyncio.Event] = {}
 _active_tasks: Dict[str, asyncio.Task] = {}
 
+GEN_TTL_SECONDS = 900
+
 
 def _gen_key(generation_id: str) -> str:
     return f"gen:{generation_id}"
@@ -34,7 +36,7 @@ async def is_generation_active(chat_id: str) -> bool:
     return bool(await redis.get(f"chat:{chat_id}:active_gen"))
 
 
-async def set_active_generation(chat_id: str, generation_id: str, ttl: int = 900):
+async def set_active_generation(chat_id: str, generation_id: str, ttl: int = GEN_TTL_SECONDS):
     redis = await get_redis()
     await redis.set(f"chat:{chat_id}:active_gen", generation_id, ex=ttl)
 
@@ -57,7 +59,8 @@ async def get_generation_state(generation_id: str) -> Optional[Dict[str, Any]]:
     raw = await redis.hgetall(_gen_key(generation_id))
     if not raw:
         return None
-    # decode bytes keys/values from redis
+    # decode_responses=True, so keys/values are already str — the isinstance
+    # checks below are a safety net for clients configured without it.
     data: Dict[str, Any] = {}
     for k, v in raw.items():
         kk = k.decode() if isinstance(k, bytes) else k
@@ -74,7 +77,7 @@ async def _publish(generation_id: str, event: str, data: dict):
     redis = await get_redis()
     payload = json.dumps({"event": event, "data": data})
     await redis.publish(f"{_gen_key(generation_id)}:channel", payload)
-    await redis.set(f"{_gen_key(generation_id)}:last", payload, ex=900)
+    await redis.set(f"{_gen_key(generation_id)}:last", payload, ex=GEN_TTL_SECONDS)
 
 
 async def run_generation(
@@ -106,7 +109,7 @@ async def run_generation(
             "started_at": datetime.now(timezone.utc).isoformat(),
         },
     )
-    await redis.expire(key, 900)
+    await redis.expire(key, GEN_TTL_SECONDS)
     await _publish(generation_id, "thinking", {"message": "Thinking..."})
 
     full_content = ""
@@ -135,7 +138,7 @@ async def run_generation(
             full_content += token
             token_count += 1
             await redis.rpush(f"{key}:tokens", token)
-            await redis.expire(f"{key}:tokens", 900)
+            await redis.expire(f"{key}:tokens", GEN_TTL_SECONDS)
             await _publish(generation_id, "token", {"token": token})
 
         logger.info(
@@ -156,74 +159,85 @@ async def run_generation(
         logger.exception("generation_failed", generation_id=generation_id, error=str(e))
         await _publish(generation_id, "failed", {"message": error_msg or "Generation failed"})
 
-    # Persist final state
-    async with AsyncSessionLocal() as session:
+    # Persist the final state. Wrapped so that a DB hiccup can never leave the
+    # chat permanently locked — see the finally block below.
+    try:
+        async with AsyncSessionLocal() as session:
+            try:
+                result = await session.execute(
+                    select(Message).where(Message.id == uuid.UUID(message_id))
+                )
+                msg = result.scalar_one_or_none()
+                if msg:
+                    msg.content = full_content
+                    msg.status = status
+                    msg.error_message = error_msg
+                    msg.model_name = settings.OLLAMA_MODEL
+                    msg.updated_at = datetime.now(timezone.utc)
+                    await session.commit()
+
+                if is_first_message and status == MessageStatus.COMPLETED and full_content:
+                    try:
+                        title = await ollama_service.generate_title(
+                            user_message_content, full_content
+                        )
+                    except Exception:
+                        title = (user_message_content[:48] + "…") if len(user_message_content) > 48 else user_message_content
+                    await session.execute(
+                        update(Chat)
+                        .where(Chat.id == uuid.UUID(chat_id))
+                        .values(
+                            title=title,
+                            is_title_generated=True,
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    await session.commit()
+                    await _publish(
+                        generation_id, "title", {"title": title, "chat_id": chat_id}
+                    )
+            except Exception as e:
+                logger.exception("db_update_failed", error=str(e))
+
+        await redis.hset(
+            key,
+            mapping={
+                "status": status.value,
+                "content": full_content,
+                "error": error_msg or "",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        await redis.expire(key, GEN_TTL_SECONDS)
+
+        event_name = "done"
+        if status == MessageStatus.STOPPED:
+            event_name = "stopped"
+        elif status == MessageStatus.FAILED:
+            event_name = "failed"
+        await _publish(
+            generation_id,
+            event_name,
+            {
+                "status": status.value,
+                "content": full_content,
+                "error": error_msg,
+                "message_id": message_id,
+                "chat_id": chat_id,
+            },
+        )
+    except Exception as e:
+        logger.exception("generation_finalize_failed", error=str(e))
+    finally:
+        # Always release the per-chat lock and drop in-process bookkeeping,
+        # whatever happened above.
         try:
-            result = await session.execute(
-                select(Message).where(Message.id == uuid.UUID(message_id))
-            )
-            msg = result.scalar_one_or_none()
-            if msg:
-                msg.content = full_content
-                msg.status = status
-                msg.error_message = error_msg
-                msg.model_name = settings.OLLAMA_MODEL
-                msg.updated_at = datetime.now(timezone.utc)
-                await session.commit()
-
-            if is_first_message and status == MessageStatus.COMPLETED and full_content:
-                try:
-                    title = await ollama_service.generate_title(
-                        user_message_content, full_content
-                    )
-                except Exception:
-                    title = (user_message_content[:48] + "…") if len(user_message_content) > 48 else user_message_content
-                await session.execute(
-                    update(Chat)
-                    .where(Chat.id == uuid.UUID(chat_id))
-                    .values(
-                        title=title,
-                        is_title_generated=True,
-                        updated_at=datetime.now(timezone.utc),
-                    )
-                )
-                await session.commit()
-                await _publish(
-                    generation_id, "title", {"title": title, "chat_id": chat_id}
-                )
+            await clear_active_generation(chat_id)
         except Exception as e:
-            logger.exception("db_update_failed", error=str(e))
-
-    await redis.hset(
-        key,
-        mapping={
-            "status": status.value,
-            "content": full_content,
-            "error": error_msg or "",
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-    event_name = "done"
-    if status == MessageStatus.STOPPED:
-        event_name = "stopped"
-    elif status == MessageStatus.FAILED:
-        event_name = "failed"
-    await _publish(
-        generation_id,
-        event_name,
-        {
-            "status": status.value,
-            "content": full_content,
-            "error": error_msg,
-            "message_id": message_id,
-            "chat_id": chat_id,
-        },
-    )
-
-    await clear_active_generation(chat_id)
-    _stop_flags.pop(generation_id, None)
-    _active_tasks.pop(generation_id, None)
-    logger.info("run_generation_end", generation_id=generation_id, status=status.value)
+            logger.warning("clear_active_generation_failed", error=str(e))
+        _stop_flags.pop(generation_id, None)
+        _active_tasks.pop(generation_id, None)
+        logger.info("run_generation_end", generation_id=generation_id, status=status.value)
 
 
 def start_generation_task(
