@@ -1,5 +1,7 @@
 from typing import Optional
+
 import redis.asyncio as aioredis
+
 from app.core.config import settings
 
 _redis: Optional[aioredis.Redis] = None
@@ -13,6 +15,7 @@ async def get_redis() -> aioredis.Redis:
             encoding="utf-8",
             decode_responses=True,
             max_connections=50,
+            health_check_interval=30,
         )
     return _redis
 
@@ -20,5 +23,6 @@ async def get_redis() -> aioredis.Redis:
 async def close_redis():
     global _redis
     if _redis:
-        await _redis.close()
+        # redis.asyncio: close() is deprecated in favour of aclose().
+        await _redis.aclose()
         _redis = None
