@@ -5,6 +5,7 @@ RAG pipeline: chunk → embed (Ollama) → ChromaDB + keyword fallback.
 from __future__ import annotations
 
 import re
+import asyncio
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -15,9 +16,7 @@ from app.core.config import settings
 
 logger = structlog.get_logger()
 
-EMBED_BATCH_SIZE = 32
-KEYWORD_SCAN_LIMIT = 2000
-FAQ_MIN_OVERLAP = 2
+KEYWORD_SCAN_LIMIT = 2000  # chunks read by the keyword fallback
 
 _chroma_client = None
 _collection = None
@@ -32,7 +31,10 @@ def _get_chroma():
         Path(settings.CHROMA_PERSIST_DIR).mkdir(parents=True, exist_ok=True)
         _chroma_client = chromadb.PersistentClient(
             path=settings.CHROMA_PERSIST_DIR,
-            settings=ChromaSettings(anonymized_telemetry=False),
+            settings=ChromaSettings(
+                anonymized_telemetry=False,
+                chroma_product_telemetry_impl="app.services.rag.telemetry.NoOpTelemetry",
+            ),
         )
         _collection = _chroma_client.get_or_create_collection(
             name="knowledge_base",
@@ -42,35 +44,30 @@ def _get_chroma():
 
 
 async def _embed_ollama(texts: List[str]) -> Optional[List[List[float]]]:
-    """Batch embed via /api/embed; fall back to legacy /api/embeddings one by one."""
     base = settings.OLLAMA_BASE_URL.rstrip("/")
     model = settings.OLLAMA_EMBED_MODEL
+    out: List[List[float]] = []
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            out: List[List[float]] = []
-            batch_ok = True
-            for i in range(0, len(texts), EMBED_BATCH_SIZE):
-                batch = texts[i : i + EMBED_BATCH_SIZE]
-                r = await client.post(f"{base}/api/embed", json={"model": model, "input": batch})
-                embs = r.json().get("embeddings") if r.status_code < 400 else None
-                if not embs or len(embs) != len(batch):
-                    batch_ok = False
-                    break
-                out.extend(embs)
-            if batch_ok:
-                return out
-
-            # Legacy Ollama (< 0.3): one request per text
-            out = []
             for text in texts:
-                r = await client.post(f"{base}/api/embeddings", json={"model": model, "prompt": text})
-                if r.status_code >= 400:
+                for payload in (
+                    {"model": model, "prompt": text,
+                     "keep_alive": settings.OLLAMA_KEEP_ALIVE,
+                     "options": {"num_gpu": 0} if settings.RAG_EMBED_ON_CPU else {}},
+                ):
+                    r = await client.post(f"{base}/api/embeddings", json=payload)
+                    if r.status_code >= 400:
+                        continue
+                    data = r.json()
+                    emb = data.get("embedding")
+                    if not emb and isinstance(data.get("embeddings"), list) and data["embeddings"]:
+                        emb = data["embeddings"][0]
+                    if emb:
+                        out.append(emb)
+                        break
+                else:
                     return None
-                emb = r.json().get("embedding")
-                if not emb:
-                    return None
-                out.append(emb)
-            return out
+        return out
     except Exception as e:
         logger.warning("ollama_embed_failed", error=str(e))
         return None
@@ -84,21 +81,6 @@ async def embed_texts(texts: List[str]) -> Optional[List[List[float]]]:
 
 def chunk_text(text: str, chunk_size: int = 350, overlap: int = 40) -> List[str]:
     blocks = re.split(r"\n\s*\n", text.strip())
-    # A document without blank lines would otherwise become one huge block:
-    # fall back to single newlines, then sentences.
-    if len(blocks) == 1 and len(text.split()) > chunk_size:
-        blocks = [b for b in text.splitlines() if b.strip()]
-        if len(blocks) == 1:
-            blocks = re.split(r"(?<=[.!?])\s+", text.strip())
-        merged, buf = [], []
-        for blk in blocks:
-            if buf and len(" ".join(buf + [blk]).split()) > chunk_size:
-                merged.append(" ".join(buf))
-                buf = []
-            buf.append(blk.strip())
-        if buf:
-            merged.append(" ".join(buf))
-        blocks = merged
     chunks: List[str] = []
     for block in blocks:
         block = block.strip()
@@ -161,7 +143,7 @@ def _keyword_search(query: str, top_k: int) -> List[Dict[str, Any]]:
 
 
 async def index_document(doc_id: str, text: str, metadata: Optional[Dict] = None) -> int:
-    _, collection = _get_chroma()
+    _, collection = await asyncio.to_thread(_get_chroma)
     chunks = chunk_text(text)
     if not chunks:
         return 0
@@ -178,35 +160,57 @@ async def index_document(doc_id: str, text: str, metadata: Optional[Dict] = None
         pass
 
     if embeddings and len(embeddings) == len(chunks):
-        collection.add(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+        await asyncio.to_thread(collection.add, ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
         logger.info("document_indexed", doc_id=doc_id, chunks=len(chunks), mode="embedding")
     else:
         dim = 768
         placeholders = [[0.0] * dim for _ in chunks]
-        collection.add(ids=ids, embeddings=placeholders, documents=chunks, metadatas=metadatas)
+        await asyncio.to_thread(collection.add, ids=ids, embeddings=placeholders, documents=chunks, metadatas=metadatas)
         logger.warning("document_indexed_keyword_only", doc_id=doc_id, chunks=len(chunks))
     return len(chunks)
 
 
+async def delete_indexed_document(doc_id: str) -> None:
+    _, collection = await asyncio.to_thread(_get_chroma)
+    await asyncio.to_thread(collection.delete, where={"doc_id": doc_id})
+
+
 async def query_knowledge(query: str, top_k: int = None) -> List[Dict[str, Any]]:
+    greeting = re.sub(r"[^\w\s]", "", query.casefold()).strip()
+    if greeting in {"hi", "hello", "hey", "сайн уу", "сайн байна уу", "sain uu", "sain baina uu"}:
+        return []
     top_k = top_k or settings.RAG_TOP_K
     try:
-        _, collection = _get_chroma()
-        count = collection.count()
+        _, collection = await asyncio.to_thread(_get_chroma)
+        count = await asyncio.to_thread(collection.count)
         if count == 0:
             logger.info("rag_empty_collection", query=query[:80])
             return []
 
-        q_emb = await embed_texts([query])
+        # Exact FAQ replies need no embedding model load or GPU model swap.
+        keyword_hits = await asyncio.to_thread(_keyword_search, query, top_k)
+        if extract_faq_answer(keyword_hits, query):
+            return keyword_hits
+
+        try:
+            q_emb = await asyncio.wait_for(
+                embed_texts([query]), timeout=max(0.05, settings.RAG_TIMEOUT_SECONDS * 0.7)
+            )
+        except asyncio.TimeoutError:
+            return keyword_hits
         if q_emb and len(q_emb) == 1:
             try:
-                results = collection.query(query_embeddings=q_emb, n_results=min(top_k, count))
+                results = await asyncio.to_thread(collection.query, query_embeddings=q_emb, n_results=min(top_k, count))
                 hits = []
                 docs = (results.get("documents") or [[]])[0]
                 metas = (results.get("metadatas") or [[]])[0]
                 dists = (results.get("distances") or [[]])[0]
                 for i, doc in enumerate(docs):
                     if not doc:
+                        continue
+                    # Keyword-only placeholder vectors have distance 1 and
+                    # must not masquerade as relevant semantic matches.
+                    if i < len(dists) and dists[i] >= 0.85:
                         continue
                     hits.append(
                         {
@@ -221,21 +225,30 @@ async def query_knowledge(query: str, top_k: int = None) -> List[Dict[str, Any]]
             except Exception as e:
                 logger.warning("rag_vector_query_failed", error=str(e))
 
-        return _keyword_search(query, top_k)
+        return keyword_hits
     except Exception as e:
         logger.warning("rag_query_failed", error=str(e))
-        return _keyword_search(query, top_k or 5)
+        return await asyncio.to_thread(_keyword_search, query, top_k or 5)
 
 
 def build_rag_context(hits: List[Dict[str, Any]]) -> str:
     if not hits:
         return ""
-    parts = [
-        "Use ONLY the knowledge base below when it answers the question. "
-        "Reply in the same language as the user.\nKnowledge base:"
-    ]
-    for i, h in enumerate(hits, 1):
-        parts.append(f"[{i}] {h['content']}")
+    parts = []
+    seen = set()
+    remaining = max(0, settings.RAG_MAX_CONTEXT_CHARS)
+    for hit in hits:
+        text = (hit.get("content") or "").strip()
+        if not text or text in seen or remaining <= 0:
+            continue
+        seen.add(text)
+        prefix = f"[{len(parts) + 1}] "
+        available = remaining - len(prefix) - 2
+        if available < 1:
+            break
+        excerpt = text[:available]
+        parts.append(prefix + excerpt)
+        remaining -= len(prefix) + len(excerpt) + 2
     return "\n\n".join(parts)
 
 
@@ -256,31 +269,23 @@ def extract_faq_answer(hits, query: str = ""):
     if not qt:
         return None
 
-    best_text, best_ov = None, 0
+    best_answer, best_score = None, 0.0
     for h in hits:
         text = (h.get("content") or "").strip()
         if not text:
             continue
-        ov = len(qt & tokens(text))
-        if ql in text.lower():
-            ov += 3
-        if ov > best_ov:
-            best_ov = ov
-            best_text = text
-
-    # Require at least FAQ_MIN_OVERLAP shared words before skipping the LLM.
-    if not best_text or best_ov < FAQ_MIN_OVERLAP:
-        return None
-
-    # Хариулт: байвал түүнийг авна, байхгүй бол бүтэн chunk
-    ans = best_text
-    for sep in ("Хариулт:", "Хариулт :", "Answer:", "Answer :"):
-        if sep in best_text:
-            ans = best_text.split(sep, 1)[-1].strip()
-            break
-
-    try:
-        logger.info("rag_direct_answer", overlap=best_ov, preview=ans[:100])
-    except Exception:
-        pass
-    return ans.strip() if ans else None
+        pairs = re.finditer(
+            r"(?:Асуулт|Question)\s*:\s*(.*?)\s*(?:Хариулт|Answer)\s*:\s*(.*?)(?=\n\s*(?:Асуулт|Question)\s*:|\n\s*===|\Z)",
+            text, re.IGNORECASE | re.DOTALL,
+        )
+        for pair in pairs:
+            question, answer = pair.group(1).strip(), pair.group(2).strip()
+            question_tokens = tokens(question)
+            overlap = len(qt & question_tokens)
+            score = overlap / max(len(qt | question_tokens), 1)
+            if qt == question_tokens:
+                score = 1.0
+            # A shared generic word must never bypass model interpretation.
+            if answer and overlap >= 2 and score >= 0.8 and score > best_score:
+                best_answer, best_score = answer, score
+    return best_answer

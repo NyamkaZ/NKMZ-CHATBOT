@@ -11,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.user import User, SubscriptionTier
 
+_UNSET = object()
+
 logger = structlog.get_logger()
 
 PLAN_LIMITS: Dict[SubscriptionTier, int] = {
@@ -82,13 +84,13 @@ async def apply_tier(
     tier: SubscriptionTier,
     *,
     stripe_customer_id: Optional[str] = None,
-    stripe_subscription_id: Optional[str] = None,
+    stripe_subscription_id: Optional[str] | object = _UNSET,
     expires_at: Optional[datetime] = None,
 ) -> None:
     user.subscription_tier = tier
     if stripe_customer_id:
         user.stripe_customer_id = stripe_customer_id
-    if stripe_subscription_id is not None:
+    if stripe_subscription_id is not _UNSET:
         user.stripe_subscription_id = stripe_subscription_id
     user.subscription_expires_at = expires_at
     await db.commit()

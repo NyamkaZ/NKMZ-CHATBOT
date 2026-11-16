@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import typography from "@tailwindcss/typography";
 
 const config: Config = {
   darkMode: ["class"],
@@ -64,12 +65,12 @@ const config: Config = {
         "thinking-dot": "thinking-dot 1.4s infinite ease-in-out both",
       },
       boxShadow: {
-        soft: "0 1px 2px hsl(222 28% 12% / 0.04), 0 8px 24px hsl(222 28% 12% / 0.06)",
+        soft: "0 1px 2px hsl(0 0% 0% / 0.05), 0 8px 24px hsl(0 0% 0% / 0.08)",
         glow: "0 0 0 1px hsl(var(--brand) / 0.2), 0 8px 28px hsl(var(--glow) / 0.18)",
       },
     },
   },
-  plugins: [],
+  plugins: [typography],
 };
 
 export default config;

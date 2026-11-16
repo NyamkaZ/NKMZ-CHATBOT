@@ -1,0 +1,3 @@
+# Install after requirements.txt. Tests use isolated SQLite and fake Redis.
+aiosqlite==0.22.1
+fakeredis[lua]==2.40.0

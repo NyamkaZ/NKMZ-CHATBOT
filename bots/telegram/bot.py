@@ -6,15 +6,26 @@ Or as a separate container.
 """
 
 import asyncio
+import hashlib
+import hmac
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import structlog
 
 logger = structlog.get_logger()
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-API_URL = os.getenv("INTERNAL_API_URL", "http://backend:8000")
+API_URL = os.getenv("INTERNAL_API_URL", "http://localhost:8000").rstrip("/")
+# Proves to the backend that guest sessions come from this first-party bot, so
+# all chat users are not counted as one visitor (must match auth.internal_client_token).
+INTERNAL_HEADERS = {"X-Internal-Token": hmac.new(
+    os.getenv("SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32").encode(),
+    b"nkmz-internal-client", hashlib.sha256,
+).hexdigest()}
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
 
@@ -36,18 +47,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # In production you would map telegram_id → platform user.
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            # Ensure guest / map exists (simplified: use telegram id as guest)
-            headers = {"X-Guest-Id": f"tg_{user_id}"}
+            if not context.user_data.get("access_token"):
+                guest_resp = await client.post(f"{API_URL}/api/v1/auth/guest", headers=INTERNAL_HEADERS)
+                guest_resp.raise_for_status()
+                context.user_data["access_token"] = guest_resp.json()["access_token"]
+            headers = {"Authorization": f"Bearer {context.user_data['access_token']}"}
             # Send message via backend
             resp = await client.post(
                 f"{API_URL}/api/v1/chats/send",
-                json={"content": text},
+                json={"content": text, "chat_id": context.user_data.get("chat_id")},
                 headers=headers,
             )
             if resp.status_code == 429:
                 await update.message.reply_text("⚠️ Daily message limit reached. Please try again tomorrow.")
                 return
-            if resp.status_code == 403:
+            if resp.status_code in (401, 403):
                 await update.message.reply_text("🔐 Please register on the website to continue.")
                 return
             if resp.status_code >= 400:
@@ -56,12 +70,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             data = resp.json()
-            gen_id = data["assistant_message"]["generation_id"]
+            context.user_data["chat_id"] = data["chat"]["id"]
             # Poll / stream for completion (simplified polling)
             content = ""
             for _ in range(120):
-                state_resp = await client.get(f"{API_URL}/api/v1/stream/{gen_id}")
-                # In real bot we would properly consume SSE; here we use a short sleep + final DB fetch
                 await asyncio.sleep(1)
                 # Better: after a short wait fetch the chat again
                 chat_id = data["chat"]["id"]
@@ -77,7 +89,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             break
                     if content:
                         break
-            await update.message.reply_text(content or "Generation timed out.")
+            content = content or "Generation timed out."
+            for offset in range(0, len(content), 4000):
+                await update.message.reply_text(content[offset:offset + 4000])
     except Exception as e:
         logger.exception("tg_handle_error", error=str(e))
         await update.message.reply_text("Sorry, I encountered an error.")

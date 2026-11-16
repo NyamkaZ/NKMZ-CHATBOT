@@ -1,0 +1,188 @@
+.dock {
+  flex: none;
+  padding: 8px var(--desk-gutter, 20px) max(15px, env(safe-area-inset-bottom));
+  color: #f5f5f5;
+}
+
+.inner {
+  width: 100%;
+  max-width: 48rem;
+  margin-inline: auto;
+}
+
+.inner[data-dashboard] {
+  max-width: var(--desk-width, 1080px);
+}
+
+.panel {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #393939;
+  border-radius: 18px;
+  padding: 14px 12px 10px;
+  background: linear-gradient(145deg, #151515f5, #0a0a0af5);
+  transition: border-color 150ms ease;
+}
+
+.panel:focus-within {
+  border-color: #999;
+}
+
+.input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-height: min(200px, 24dvh);
+  resize: none;
+  border: 0;
+  padding: 2px 5px 6px;
+  background: transparent;
+  color: #fafafa;
+  caret-color: #e5e5e5;
+  font-size: 16px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.input::placeholder {
+  color: #a3a3a3;
+}
+
+.toolbar, .actions, .mode, .voice, .send, .option, .quota, .footnote {
+  display: flex;
+  align-items: center;
+}
+
+.toolbar, .option, .footnote {
+  justify-content: space-between;
+}
+
+.toolbar {
+  gap: 12px;
+}
+
+.actions {
+  gap: 5px;
+}
+
+.mode, .voice, .send, .option {
+  -webkit-tap-highlight-color: transparent;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+
+.mode {
+  gap: 7px;
+  min-height: 34px;
+  border: 1px solid #ffffff14;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #ffffff04;
+  color: #d4d4d4;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.mode svg { color: #a3a3a3; }
+.mode:hover, .mode[data-state="open"], .voice:hover:enabled { background: #ffffff0d; }
+.mode[data-state="open"] svg:last-child { transform: rotate(180deg); }
+
+.voice, .send {
+  justify-content: center;
+  height: 38px;
+  width: 38px;
+  border-radius: 12px;
+}
+
+.voice { color: #d4d4d4; }
+.voice[aria-pressed="true"] { color: #fff; background: #ffffff24; }
+.voice:disabled { opacity: 0.45; }
+.send { background: #e5e5e5; color: #0a0a0a; }
+.send:hover:enabled { background: #fff; }
+.send:disabled { background: #393939; color: #a3a3a3; }
+
+.mode:focus-visible, .voice:focus-visible, .send:focus-visible, .failure button:focus-visible, .quota a:focus-visible {
+  outline: 2px solid #e5e5e5;
+  outline-offset: 3px;
+}
+
+.menu {
+  z-index: 70;
+  min-width: 178px;
+  max-height: var(--radix-dropdown-menu-content-available-height);
+  overflow-y: auto;
+  border: 1px solid #393939;
+  border-radius: 12px;
+  padding: 5px;
+  background: #141414;
+  color: #ededed;
+  box-shadow: 0 6px 22px #0004;
+}
+
+.menuLabel {
+  padding: 8px 9px 6px;
+  color: #a3a3a3;
+  font-size: 11px;
+}
+
+.option {
+  gap: 20px;
+  min-height: 35px;
+  border-radius: 7px;
+  padding: 5px 9px;
+  outline: none;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.option[data-highlighted] { background: #ffffff0e; }
+.option[data-state="checked"] { color: #fff; }
+
+.footnote {
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 8px 2px 0;
+  color: #aaa;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.disclaimer:only-child { margin-inline: auto; }
+.quota { flex-wrap: wrap; gap: 3px 7px; font-variant-numeric: tabular-nums; }
+.tier { text-transform: uppercase; font-size: 0.9em; }
+.quota a, .failure button { color: #ededed; text-decoration: underline; text-underline-offset: 3px; }
+.meter { width: 27px; height: 3px; overflow: hidden; border-radius: 3px; background: #404040; }
+.meter i { display: block; height: 100%; background: #bdbdbd; }
+.quota[data-low] { color: #e5e5e5; }
+.quota[data-low] .meter i { background: currentColor; }
+
+.failure {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 7px;
+  border: 1px solid #525252;
+  border-radius: 10px;
+  padding: 9px 13px;
+  background: #171717;
+  color: #f2f2f2;
+  font-size: 12px;
+}
+.failure button { flex: none; padding: 4px; }
+
+@media (min-width: 768px) {
+  .panel { gap: 6px; padding: 16px 14px 12px; }
+  .input { padding-inline: 6px; }
+}
+
+@media (max-width: 600px) {
+  .dock { padding-block: 6px max(8px, env(safe-area-inset-bottom)); }
+  .panel { padding: 9px 8px 5px; gap: 2px; }
+  .footnote { justify-content: center; text-align: center; font-size: 10px; }
+  .mode { min-height: 38px; }
+  .voice, .send { width: 40px; height: 40px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel, .mode, .voice, .send, .option { transition: none; }
+}

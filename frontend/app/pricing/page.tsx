@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import LaserFlow from "@/components/react-bits/LaserFlow";
 import { api } from "@/lib/api";
 import { useChatStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Check, Sparkles, ArrowLeft, Loader2 } from "lucide-react";
+import { Check, ArrowLeft, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 type Plan = {
@@ -20,8 +21,10 @@ type Plan = {
 
 export default function PricingPage() {
   const { loadAuth, user, t } = useChatStore();
+  const proCardRef = useRef<HTMLDivElement>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [stripeEnabled, setStripeEnabled] = useState(false);
+  const [demoEnabled, setDemoEnabled] = useState(false);
   const [loading, setLoading] = useState<string | null>(null);
   const [currentTier, setCurrentTier] = useState("free");
 
@@ -30,9 +33,10 @@ export default function PricingPage() {
     api.getPlans().then((data: any) => {
       setPlans(data.plans || []);
       setStripeEnabled(!!data.stripe_enabled);
-    });
+      setDemoEnabled(!!data.demo_enabled);
+    }).catch((error: Error) => toast.error(error.message));
     api.getSubscription().then((s: any) => setCurrentTier(s.tier || "free")).catch(() => {});
-  }, []);
+  }, [loadAuth]);
 
   const checkout = async (planId: string) => {
     if (planId === "free") return;
@@ -60,8 +64,11 @@ export default function PricingPage() {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-background text-foreground">
-      <div className="mx-auto max-w-5xl px-4 py-10">
+    <div className="relative isolate min-h-[100dvh] overflow-hidden bg-background text-foreground">
+      <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden="true">
+        <LaserFlow surfaceRef={proCardRef} beamPosition={0.5} color="#3847ff" intensity={1.5} flare={1.2} spread={1.5} fog={0.2} dust={1} dpr={1.25} />
+      </div>
+      <div className="mx-auto max-w-5xl px-4 py-10 pb-20">
         <Link
           href="/"
           className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-8"
@@ -70,7 +77,7 @@ export default function PricingPage() {
           {t("backToChat")}
         </Link>
 
-        <div className="text-center mb-12">
+        <div className="relative text-center mb-20 md:mb-32">
           <p className="font-display text-xs uppercase tracking-[0.2em] text-primary mb-2">
             NKMZ
           </p>
@@ -80,7 +87,7 @@ export default function PricingPage() {
           <p className="mt-3 text-muted-foreground max-w-lg mx-auto">
             {t("pricingSubtitle")}
           </p>
-          {!stripeEnabled && (
+          {demoEnabled && (
             <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
               {t("demoBillingNote")}
             </p>
@@ -94,11 +101,12 @@ export default function PricingPage() {
             return (
               <div
                 key={plan.id}
+                ref={highlighted ? proCardRef : undefined}
                 className={cn(
                   "relative rounded-3xl border p-6 flex flex-col",
                   highlighted
-                    ? "border-primary/50 bg-gradient-to-b from-primary/10 to-background shadow-glow"
-                    : "border-border/80 bg-card/50"
+                    ? "border-primary/40 bg-gradient-to-b from-[#171720]/95 to-background/95 shadow-glow"
+                    : "border-border/80 bg-card/80 backdrop-blur-md"
                 )}
               >
                 {highlighted && (
@@ -107,7 +115,7 @@ export default function PricingPage() {
                   </span>
                 )}
                 <div className="flex items-center gap-2 mb-4">
-                  <Sparkles className="h-5 w-5 text-primary" />
+
                   <h2 className="font-display text-xl font-semibold">{plan.name}</h2>
                 </div>
                 <div className="mb-4">
@@ -132,7 +140,7 @@ export default function PricingPage() {
                 <Button
                   className="w-full rounded-xl"
                   variant={highlighted ? "default" : "outline"}
-                  disabled={isCurrent || loading === plan.id || plan.id === "free"}
+                  disabled={isCurrent || loading !== null || plan.id === "free" || (!stripeEnabled && !demoEnabled)}
                   onClick={() => checkout(plan.id)}
                 >
                   {loading === plan.id ? (
@@ -153,3 +161,4 @@ export default function PricingPage() {
     </div>
   );
 }
+

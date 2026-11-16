@@ -1,15 +1,15 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { useChatStore } from "@/lib/store";
-import { api } from "@/lib/api";
+import { api, handleResponse } from "@/lib/api";
 import { FileUp, Loader2, Trash2 } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
 
 function headers() {
   const h: HeadersInit = { "Content-Type": "application/json" };
@@ -20,12 +20,34 @@ function headers() {
   return h;
 }
 
+interface UsageReport {
+  days: number;
+  answers: number;
+  direct_answers: number;
+  prompt_tokens: number;
+  output_tokens: number;
+  model_seconds: number;
+  avg_seconds: number | null;
+  tokens_per_second: number | null;
+  daily: { date: string; answers: number; prompt_tokens: number; output_tokens: number }[];
+  top_users: { email: string | null; answers: number; prompt_tokens: number; output_tokens: number }[];
+}
+
+const number = (value: number) => value.toLocaleString("en-US");
+
+function modelTime(seconds: number) {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${(seconds / 3600).toFixed(1)}h`;
+}
+
 export default function AdminPage() {
   const router = useRouter();
   const { user, authLoaded, loadAuth, t } = useChatStore();
   const [status, setStatus] = useState<any>(null);
   const [users, setUsers] = useState<any[]>([]);
   const [analytics, setAnalytics] = useState<any>(null);
+  const [usage, setUsage] = useState<UsageReport | null>(null);
   const [models, setModels] = useState<any[]>([]);
   const [settings, setSettings] = useState<any>(null);
   const [docs, setDocs] = useState<any[]>([]);
@@ -36,21 +58,7 @@ export default function AdminPage() {
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    loadAuth();
-  }, []);
-
-  useEffect(() => {
-    if (!authLoaded) return;
-    if (!user || user.is_guest || user.role !== "admin") {
-      setError(t("adminRequired"));
-      const timer = setTimeout(() => router.replace("/login"), 1500);
-      return () => clearTimeout(timer);
-    }
-    load();
-  }, [authLoaded, user]);
-
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const opts = { headers: headers() };
       const [s, a, u, m, st, d] = await Promise.all([
@@ -58,15 +66,20 @@ export default function AdminPage() {
           if (!r.ok) throw new Error(t("adminRequired"));
           return r.json();
         }),
-        fetch(`${API_URL}/api/v1/admin/analytics`, opts).then((r) => r.json()),
+        fetch(`${API_URL}/api/v1/admin/analytics`, opts).then(handleResponse),
         fetch(
           `${API_URL}/api/v1/admin/users?q=${encodeURIComponent(search)}`,
           opts
-        ).then((r) => r.json()),
-        fetch(`${API_URL}/api/v1/admin/models`, opts).then((r) => r.json()),
-        fetch(`${API_URL}/api/v1/admin/settings`, opts).then((r) => r.json()),
+        ).then((r) => handleResponse<any[]>(r)),
+        fetch(`${API_URL}/api/v1/admin/models`, opts).then((r) => handleResponse<any[]>(r)),
+        fetch(`${API_URL}/api/v1/admin/settings`, opts).then((r) => handleResponse<any>(r)),
         api.listDocuments().catch(() => []),
       ]);
+      // Optional: the rest of the panel still loads if this report fails.
+      fetch(`${API_URL}/api/v1/admin/usage?days=30`, opts)
+        .then((r) => handleResponse<UsageReport>(r))
+        .then(setUsage)
+        .catch(() => setUsage(null));
       setStatus(s);
       setAnalytics(a);
       setUsers(u);
@@ -78,7 +91,21 @@ export default function AdminPage() {
     } catch (e: any) {
       setError(e.message || "Failed to load");
     }
-  };
+  }, [search, t]);
+
+  useEffect(() => {
+    loadAuth();
+  }, [loadAuth]);
+
+  useEffect(() => {
+    if (!authLoaded) return;
+    if (!user || user.is_guest || user.role !== "admin") {
+      setError(t("adminRequired"));
+      const timer = setTimeout(() => router.replace("/login"), 1500);
+      return () => clearTimeout(timer);
+    }
+    load();
+  }, [authLoaded, user, load, router, t]);
 
   const saveLimit = async () => {
     setSaving(true);
@@ -104,10 +131,11 @@ export default function AdminPage() {
 
   const toggleUser = async (id: string) => {
     try {
-      await fetch(`${API_URL}/api/v1/admin/users/${id}/toggle-active`, {
+      const response = await fetch(`${API_URL}/api/v1/admin/users/${id}/toggle-active`, {
         method: "POST",
         headers: headers(),
       });
+      await handleResponse(response);
       await load();
       toast.success("OK");
     } catch {
@@ -329,6 +357,76 @@ export default function AdminPage() {
                 </div>
               ))}
             </div>
+          </section>
+        )}
+
+        {usage && (
+          <section className="rounded-xl border border-border p-4 md:p-6">
+            <h2 className="text-lg font-semibold">{t("modelUsage")}</h2>
+            <p className="text-xs text-muted-foreground mt-1 mb-4">{t("modelUsagePeriod")}</p>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+              {[
+                [t("usageAnswers"), number(usage.answers)],
+                [t("usageOutputTokens"), number(usage.output_tokens)],
+                [t("usagePromptTokens"), number(usage.prompt_tokens)],
+                [t("usageModelTime"), modelTime(usage.model_seconds)],
+                [t("usageAvgTime"), usage.avg_seconds === null ? "—" : `${usage.avg_seconds}s`],
+                [t("usageSpeed"), usage.tokens_per_second === null ? "—" : `${usage.tokens_per_second} tok/s`],
+              ].map(([label, val]) => (
+                <div key={label}>
+                  <div className="text-muted-foreground">{label}</div>
+                  <div className="text-2xl font-bold">{val}</div>
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground mt-3">
+              {t("usageDirect")}: {number(usage.direct_answers)}
+            </p>
+
+            {usage.answers > 0 && (
+              <div className="mt-6 grid gap-6 md:grid-cols-2">
+                <div className="overflow-x-auto -mx-1">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border text-left text-muted-foreground">
+                        <th className="pb-2 pr-4">{t("usageDay")}</th>
+                        <th className="pb-2 pr-4 text-right">{t("usageAnswers")}</th>
+                        <th className="pb-2 text-right">{t("usageOutputTokens")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {usage.daily.filter((day) => day.answers > 0).reverse().slice(0, 10).map((day) => (
+                        <tr key={day.date} className="border-b border-border/50">
+                          <td className="py-2 pr-4 tabular-nums">{day.date}</td>
+                          <td className="py-2 pr-4 text-right tabular-nums">{number(day.answers)}</td>
+                          <td className="py-2 text-right tabular-nums">{number(day.output_tokens)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="overflow-x-auto -mx-1">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-border text-left text-muted-foreground">
+                        <th className="pb-2 pr-4">{t("usageTopUsers")}</th>
+                        <th className="pb-2 pr-4 text-right">{t("usageAnswers")}</th>
+                        <th className="pb-2 text-right">{t("usageOutputTokens")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {usage.top_users.map((row) => (
+                        <tr key={row.email ?? "guests"} className="border-b border-border/50">
+                          <td className="py-2 pr-4 break-all">{row.email ?? t("usageGuests")}</td>
+                          <td className="py-2 pr-4 text-right tabular-nums">{number(row.answers)}</td>
+                          <td className="py-2 text-right tabular-nums">{number(row.output_tokens)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </section>
         )}
 

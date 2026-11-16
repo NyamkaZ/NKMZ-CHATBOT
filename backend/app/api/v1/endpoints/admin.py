@@ -10,13 +10,16 @@ from app.core.database import get_db
 from app.core.config import settings
 from app.core.redis import get_redis
 from app.models.user import User, UserRole
-from app.models.chat import Chat, Message
+from app.models.chat import Chat, Message, MessageRole, MessageStatus
 from app.schemas.admin import (
     SystemStatus,
     ModelHealth,
     AnalyticsSummary,
     UsageLimitUpdate,
     UserAdminOut,
+    UsageReport,
+    UsageDay,
+    UsageByUser,
 )
 from app.api.v1.deps import get_admin_user
 from app.services.llm.ollama import ollama_service
@@ -92,7 +95,7 @@ async def analytics(
     messages_today = (
         await db.execute(
             select(func.count(Message.id)).where(
-                Message.created_at >= today, Message.role == "user"
+                Message.created_at >= today, Message.role == MessageRole.USER
             )
         )
     ).scalar() or 0
@@ -105,7 +108,7 @@ async def analytics(
             .join(Chat, Message.chat_id == Chat.id)
             .where(
                 Message.created_at >= today,
-                Message.role == "user",
+                Message.role == MessageRole.USER,
                 Chat.user_id.isnot(None),
             )
         )
@@ -128,13 +131,95 @@ async def analytics(
     )
 
 
+DIRECT_MODEL = "rag-direct"  # FAQ answers that never reached the model
+
+
+@router.get("/usage", response_model=UsageReport)
+async def usage_report(
+    admin: Annotated[User, Depends(get_admin_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    days: int = Query(30, ge=1, le=90),
+):
+    """What the model has cost over the last `days` days (UTC), by day and by user."""
+    from datetime import datetime, timedelta, timezone
+
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    since = today - timedelta(days=days - 1)
+    answered = (
+        Message.role == MessageRole.ASSISTANT,
+        Message.created_at >= since,
+        Message.status.in_([MessageStatus.COMPLETED, MessageStatus.STOPPED]),
+    )
+    generated = (*answered, func.coalesce(Message.model_name, "") != DIRECT_MODEL)
+    prompt_sum = func.coalesce(func.sum(Message.prompt_tokens), 0)
+    output_sum = func.coalesce(func.sum(Message.token_count), 0)
+
+    answers, prompt_tokens, output_tokens, total_ms, timed = (
+        await db.execute(
+            select(func.count(Message.id), prompt_sum, output_sum,
+                   func.coalesce(func.sum(Message.duration_ms), 0), func.count(Message.duration_ms))
+            .where(*generated)
+        )
+    ).one()
+    # Speed is only meaningful over answers that have both a time and a token count.
+    timed_tokens = (
+        await db.execute(
+            select(func.coalesce(func.sum(Message.token_count), 0))
+            .where(*generated, Message.duration_ms.isnot(None))
+        )
+    ).scalar() or 0
+    direct_answers = (
+        await db.execute(select(func.count(Message.id)).where(*answered, Message.model_name == DIRECT_MODEL))
+    ).scalar() or 0
+
+    day = func.date(Message.created_at)
+    rows = (
+        await db.execute(
+            select(day, func.count(Message.id), prompt_sum, output_sum).where(*generated).group_by(day)
+        )
+    ).all()
+    by_day = {str(d)[:10]: (int(n), int(p), int(o)) for d, n, p, o in rows}
+    daily = []
+    for offset in range(days):
+        key = (since + timedelta(days=offset)).strftime("%Y-%m-%d")
+        n, p, o = by_day.get(key, (0, 0, 0))
+        daily.append(UsageDay(date=key, answers=n, prompt_tokens=p, output_tokens=o))
+
+    users = (
+        await db.execute(
+            select(User.email, func.count(Message.id), prompt_sum, output_sum)
+            .select_from(Message)
+            .join(Chat, Message.chat_id == Chat.id)
+            .outerjoin(User, Chat.user_id == User.id)
+            .where(*generated)
+            .group_by(User.email)
+            .order_by(desc(output_sum), desc(func.count(Message.id)))
+            .limit(10)
+        )
+    ).all()
+
+    seconds = int(total_ms) / 1000
+    return UsageReport(
+        days=days,
+        answers=int(answers),
+        direct_answers=int(direct_answers),
+        prompt_tokens=int(prompt_tokens),
+        output_tokens=int(output_tokens),
+        model_seconds=round(seconds, 1),
+        avg_seconds=round(seconds / timed, 1) if timed else None,
+        tokens_per_second=round(int(timed_tokens) / seconds, 1) if seconds > 0 else None,
+        daily=daily,
+        top_users=[UsageByUser(email=e, answers=int(n), prompt_tokens=int(p), output_tokens=int(o)) for e, n, p, o in users],
+    )
+
+
 @router.get("/users", response_model=List[UserAdminOut])
 async def list_users(
     admin: Annotated[User, Depends(get_admin_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     q: Optional[str] = Query(None),
-    limit: int = Query(50, le=200),
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
 ):
     query = select(User).where(User.is_guest == False).order_by(desc(User.created_at)).limit(limit).offset(offset)
     if q:
@@ -208,6 +293,8 @@ async def toggle_user_active(
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
+    if user.id == admin.id:
+        raise HTTPException(400, "You cannot deactivate your own account")
     user.is_active = not user.is_active
     await db.commit()
     return {"id": str(user.id), "is_active": user.is_active}

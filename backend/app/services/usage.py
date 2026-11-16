@@ -1,31 +1,15 @@
 from datetime import datetime, timezone, timedelta
 from typing import Tuple
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.redis import get_redis
-from app.models.user import User, UserRole, SubscriptionTier
+from app.models.user import User, UserRole
 from app.services.settings_service import get_daily_message_limit
+from app.models.user import SubscriptionTier
 from app.services.subscription import daily_limit_for_user, effective_tier
-
-GUEST_MESSAGE_LIMIT = 1
-_DAY_TTL_SLACK = 5
-
-# Atomic check-and-increment in one round-trip.
-# Returns the new counter on success, -1 when the limit is already exhausted.
-_INCR_IF_BELOW = """
-local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-local limit = tonumber(ARGV[1])
-if current >= limit then
-  return -1
-end
-current = redis.call('INCR', KEYS[1])
-if current == 1 then
-  redis.call('EXPIRE', KEYS[1], ARGV[2])
-end
-return current
-"""
 
 
 def _today_key(user_id: str) -> str:
@@ -37,31 +21,10 @@ def _rate_key(user_id: str) -> str:
     return f"rate:{user_id}"
 
 
-def _usage_subject(user: User) -> str:
-    """Redis key subject.
-
-    Guests have no real account id, so key them by guest_id — otherwise every
-    guest would share a single counter.
-    """
-    if user.is_guest and user.guest_id:
-        return f"guest:{user.guest_id}"
-    return str(user.id)
-
-
 async def _daily_limit(user: User) -> int:
-    if user.is_guest:
-        return GUEST_MESSAGE_LIMIT
     if effective_tier(user) == SubscriptionTier.FREE:
         return await get_daily_message_limit()
     return daily_limit_for_user(user)
-
-
-def _seconds_until_midnight_utc() -> int:
-    now = datetime.now(timezone.utc)
-    tomorrow = (now + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    return int((tomorrow - now).total_seconds()) + _DAY_TTL_SLACK
 
 
 async def check_and_increment_usage(
@@ -70,64 +33,71 @@ async def check_and_increment_usage(
 ) -> Tuple[bool, int, int, str]:
     """
     Returns (allowed, used, limit, message).
-
-    Enforces the daily limit plus a short-term rate limit, both in Redis.
-    Display limits are admin-changeable and are read on every call.
+    Enforces daily limit + short-term rate limit via Redis.
+    Daily limit is read from DB/Redis settings (admin-changeable).
     """
+    allowed, used, limit, message, _ = await _reserve_usage(db, user)
+    return allowed, used, limit, message
+
+
+async def enforce_usage(db: AsyncSession, user: User) -> None:
+    """Reserve one message or raise 429 with Retry-After (seconds until allowed)."""
+    allowed, _, _, message, retry_after = await _reserve_usage(db, user)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail=message,
+            headers={"Retry-After": str(max(1, retry_after))},
+        )
+
+
+async def _reserve_usage(db: AsyncSession, user: User) -> Tuple[bool, int, int, str, int]:
     if user.role == UserRole.ADMIN:
-        return True, 0, 999999, "Admin unlimited"
+        return True, 0, 999999, "Admin unlimited", 0
 
     redis = await get_redis()
-    subject = _usage_subject(user)
+    user_id = str(user.id)
     limit = await _daily_limit(user)
 
-    # Short-term rate limit — applies to guests too.
-    rate_count = await redis.incr(_rate_key(subject))
-    if rate_count == 1:
-        await redis.expire(_rate_key(subject), 60)
-    if rate_count > settings.RATE_LIMIT_PER_MINUTE:
-        return False, 0, limit, "Хэт олон хүсэлт илгээгдлээ. Нэг минут хүлээнэ үү."
-
-    # Atomic daily check + increment (no read-then-write race between requests).
-    used = int(
-        await redis.eval(
-            _INCR_IF_BELOW,
-            1,
-            _today_key(subject),
-            str(limit),
-            str(_seconds_until_midnight_utc()),
-        )
+    now = datetime.now(timezone.utc)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    baseline = user.daily_message_count if user.last_message_date and user.last_message_date.date() == now.date() else 0
+    # Counter initialization, expiry, and reservation must be one operation.
+    # Restore today's DB mirror when Redis has restarted.
+    code, used = await redis.eval(
+        "local used = tonumber(redis.call('get', KEYS[1]) or ARGV[4]); "
+        "local rate = tonumber(redis.call('get', KEYS[2]) or '0'); "
+        "if rate >= tonumber(ARGV[2]) then return {0, used} end; "
+        "if used >= tonumber(ARGV[1]) then return {-1, used} end; "
+        "redis.call('set', KEYS[1], used + 1, 'EX', ARGV[3]); "
+        "redis.call('incr', KEYS[2]); "
+        "if rate == 0 then redis.call('expire', KEYS[2], 60) end; "
+        "return {1, used + 1}",
+        2, _today_key(user_id), _rate_key(user_id), limit,
+        settings.RATE_LIMIT_PER_MINUTE, int((tomorrow - now).total_seconds()) + 5, baseline,
     )
-    if used < 0:
-        current = int(await redis.get(_today_key(subject)) or limit)
-        if user.is_guest:
-            return (
-                False,
-                current,
-                limit,
-                "Зочин хэрэглэгч зөвхөн 1 мессеж илгээх боломжтой. "
-                "Үргэлжлүүлэхийн тулд нэвтэрнэ үү.",
-            )
+    if code == 0:
+        ttl = await redis.ttl(_rate_key(user_id))
+        return False, used, limit, "Rate limit exceeded. Please wait a minute.", ttl if ttl and ttl > 0 else 60
+    if code == -1:
         return (
             False,
-            current,
+            used,
             limit,
-            f"Өдрийн {limit} мессежийн хязгаар дууссан. "
-            "/pricing хуудаснаас багцаа ахиулж болно.",
+            f"Daily limit of {limit} messages reached. Upgrade at /pricing or wait until midnight UTC.",
+            int((tomorrow - now).total_seconds()) + 1,
         )
 
-    # DB mirror — best effort only; Redis stays the source of truth.
     try:
+        today = datetime.now(timezone.utc).date()
         user.daily_message_count = used
-        if user.last_message_date is None or user.last_message_date.date() != datetime.now(
-            timezone.utc
-        ).date():
-            user.last_message_date = datetime.now(timezone.utc)
-        await db.commit()
+        user.last_message_date = now
+        await db.flush()
     except Exception:
-        await db.rollback()
+        await redis.decr(_today_key(user_id))
+        raise
 
-    return True, used, limit, "OK"
+    return True, used, limit, "OK", 0
 
 
 async def get_usage(user: User) -> dict:
@@ -140,15 +110,14 @@ async def get_usage(user: User) -> dict:
             "resets_at": None,
             "subscription_tier": tier.value,
             "is_guest": False,
+            "is_guest": False,
         }
-
     redis = await get_redis()
-    subject = _usage_subject(user)
-    used = int(await redis.get(_today_key(subject)) or 0)
+    cached = await redis.get(_today_key(str(user.id)))
+    baseline = user.daily_message_count if user.last_message_date and user.last_message_date.date() == datetime.now(timezone.utc).date() else 0
+    used = int(cached) if cached is not None else baseline
     limit = await _daily_limit(user)
-
-    now = datetime.now(timezone.utc)
-    tomorrow = (now + timedelta(days=1)).replace(
+    tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     return {

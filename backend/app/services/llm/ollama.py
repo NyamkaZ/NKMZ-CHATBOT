@@ -6,6 +6,7 @@ Resolves a working base URL automatically (docker service name, localhost, host 
 from __future__ import annotations
 
 import json
+import time
 from typing import AsyncGenerator, List, Dict, Any, Optional
 
 import httpx
@@ -42,6 +43,21 @@ class OllamaService:
         self.model = settings.OLLAMA_MODEL
         self.timeout = httpx.Timeout(300.0, connect=10.0)
         self._resolved_base: Optional[str] = None
+        self._client: Optional[httpx.AsyncClient] = None
+        self._model_cache = None
+
+    def _http(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout, trust_env=False,
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+            )
+        return self._client
+
+    async def aclose(self):
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     @property
     def base_url(self) -> str:
@@ -55,12 +71,11 @@ class OllamaService:
         last_err: Optional[Exception] = None
         for url in _candidate_base_urls():
             try:
-                async with httpx.AsyncClient(timeout=5.0) as client:
-                    r = await client.get(f"{url}/api/tags")
-                    if r.status_code < 500:
-                        self._resolved_base = url
-                        logger.info("ollama_resolved", base_url=url, status=r.status_code)
-                        return url
+                r = await self._http().get(f"{url}/api/tags", timeout=2.0)
+                if r.status_code == 200 and isinstance(r.json().get("models"), list):
+                    self._resolved_base = url
+                    logger.info("ollama_resolved", base_url=url, status=r.status_code)
+                    return url
             except Exception as e:
                 last_err = e
                 logger.debug("ollama_probe_failed", url=url, error=str(e))
@@ -76,22 +91,19 @@ class OllamaService:
     async def health_check(self) -> Dict[str, Any]:
         try:
             base = await self.resolve_base_url()
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                r = await client.get(f"{base}/api/tags")
-                r.raise_for_status()
-                data = r.json()
-                models = [m.get("name") for m in data.get("models", [])]
-                model_loaded = self._model_in_list(models)
-                return {
-                    "available": True,
-                    "models": models,
-                    "current_model": self.model,
-                    "model_loaded": model_loaded,
-                    "base_url": base,
-                    "hint": None
-                    if model_loaded
-                    else f"Model '{self.model}' not pulled. Run: ollama pull {self.model}",
-                }
+            r = await self._http().get(f"{base}/api/tags", timeout=15.0)
+            r.raise_for_status()
+            data = r.json()
+            models = [m.get("name") for m in data.get("models", [])]
+            model_loaded = self._model_in_list(models)
+            return {
+                "available": True,
+                "models": models,
+                "current_model": self.model,
+                "model_loaded": model_loaded,
+                "base_url": base,
+                "hint": None if model_loaded else f"Model '{self.model}' not pulled. Run: ollama pull {self.model}",
+            }
         except Exception as e:
             logger.error("ollama_health_failed", error=str(e))
             return {
@@ -104,68 +116,56 @@ class OllamaService:
             }
 
     def _model_in_list(self, models: List[Optional[str]]) -> bool:
-        target = self.model
-        for m in models:
-            if not m:
-                continue
-            if m == target or m.startswith(target) or target in m:
-                return True
-            # qwen3:8b matches qwen3:8b-xxx tags
-            if target.split(":")[0] in m and "8b" in m.lower():
-                return True
-        return False
+        return self.model in models or (":" not in self.model and self.model + ":latest" in models)
 
     async def ensure_model_name(self) -> str:
-        """
-        Prefer configured model; if missing, pick closest qwen3 8b from tags.
-        """
+        """Cache model discovery without silently substituting a different model."""
+        cache_key = (self.model, self.base_url)
+        if self._model_cache and self._model_cache[0] == cache_key and time.monotonic() < self._model_cache[1]:
+            return self._model_cache[2]
         health = await self.health_check()
         if not health.get("available"):
             raise RuntimeError(health.get("error") or "Ollama unavailable")
 
         models = health.get("models") or []
-        if self._model_in_list(models):
-            # exact match preferred
-            for m in models:
-                if m == self.model:
-                    return m
-            for m in models:
-                if m and (m.startswith(self.model) or self.model in m):
-                    return m
-            for m in models:
-                if m and "qwen3" in m.lower() and "8b" in m.lower():
-                    logger.warning("ollama_using_fallback_model", configured=self.model, using=m)
-                    return m
-        return self.model
+        if not self._model_in_list(models):
+            raise RuntimeError(f"Model '{self.model}' олдсонгүй. Run: ollama pull {self.model}")
+        selected = self.model if self.model in models else self.model + ":latest"
+        self._model_cache = ((self.model, self.base_url), time.monotonic() + 60, selected)
+        return selected
 
     def _default_system_prompt(self) -> str:
-        return (
-            "You are a helpful, accurate, and concise AI assistant powered by Qwen3. "
-            "Answer in the same language the user writes in. "
-            "Be clear, structured, and useful. Use markdown when it improves readability "
-            "(lists, code blocks, headings). "
-            "If you are unsure, say so instead of inventing facts."
-        )
+        from app.services.answering import SYSTEM_PROMPT
+        return SYSTEM_PROMPT
 
-    def _apply_thinking_mode(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        mode = (settings.QWEN_THINKING_MODE or "auto").lower()
-        if mode == "auto" or not messages:
-            return messages
-        last = dict(messages[-1])
-        content = last.get("content") or ""
-        if mode == "on" and "/think" not in content and "/no_think" not in content:
-            last["content"] = content + "\n/think"
-            return messages[:-1] + [last]
-        if mode == "off" and "/no_think" not in content and "/think" not in content:
-            last["content"] = content + "\n/no_think"
-            return messages[:-1] + [last]
-        return messages
+    def _trim_history(self, messages: List[Dict[str, str]], system_prompt: str = "") -> List[Dict[str, str]]:
+        # Approximate UTF-8 token cost; retain complete recent turns and never
+        # lose the latest question. This is not an exact model tokenizer.
+        def cost(text):
+            return (len(text.encode("utf-8")) + 1) // 2 + 12
 
-    def _trim_history(self, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        max_n = settings.MAX_HISTORY_MESSAGES
-        if len(messages) <= max_n:
-            return messages
-        return messages[-max_n:]
+        groups = []
+        for message in messages[-max(1, settings.MAX_HISTORY_MESSAGES):]:
+            if not message.get("content"):
+                continue
+            if message.get("role") == "user":
+                groups.append([dict(message)])
+            elif message.get("role") == "assistant" and groups:
+                groups[-1].append(dict(message))
+        if not groups:
+            return []
+        context = min(settings.OLLAMA_CONTEXT_LENGTH, 32768)
+        reserve = min(settings.OLLAMA_NUM_PREDICT, context // 3)
+        remaining = context - reserve - cost(system_prompt) - 128
+        kept = [groups[-1]]
+        remaining -= sum(cost(m["content"]) for m in groups[-1])
+        for group in reversed(groups[:-1]):
+            size = sum(cost(m["content"]) for m in group)
+            if size > remaining:
+                break
+            kept.insert(0, group)
+            remaining -= size
+        return [message for group in kept for message in group]
 
     async def generate_title(self, user_message: str, assistant_message: str = "") -> str:
         base = await self.resolve_base_url()
@@ -183,6 +183,7 @@ class OllamaService:
                         "model": model,
                         "prompt": prompt,
                         "stream": False,
+                        "think": False,
                         "options": {
                             "temperature": 0.3,
                             "num_predict": 24,
@@ -207,6 +208,7 @@ class OllamaService:
         system_prompt: Optional[str] = None,
         stop_event=None,
         extra_options: Optional[Dict[str, Any]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[str, None]:
         """Stream tokens from Ollama /api/chat for Qwen3."""
         try:
@@ -219,13 +221,14 @@ class OllamaService:
         sys = system_prompt or self._default_system_prompt()
         payload_messages.append({"role": "system", "content": sys})
 
-        history = self._trim_history(messages)
-        history = self._apply_thinking_mode(history)
+        history = self._trim_history(messages, sys)
         payload_messages.extend(history)
 
         options = {
             "temperature": settings.OLLAMA_TEMPERATURE,
             "top_p": settings.OLLAMA_TOP_P,
+            "top_k": settings.OLLAMA_TOP_K,
+            "min_p": settings.OLLAMA_MIN_P,
             "num_predict": settings.OLLAMA_NUM_PREDICT,
             "num_ctx": min(settings.OLLAMA_CONTEXT_LENGTH, 32768),
         }
@@ -236,8 +239,12 @@ class OllamaService:
             "model": model,
             "messages": payload_messages,
             "stream": True,
+            "keep_alive": settings.OLLAMA_KEEP_ALIVE,
             "options": options,
         }
+        mode = (settings.QWEN_THINKING_MODE or "auto").lower()
+        if mode in ("off", "no_think", "on", "think"):
+            payload["think"] = mode in ("on", "think")
 
         def should_stop() -> bool:
             if stop_event is None:
@@ -250,52 +257,70 @@ class OllamaService:
 
         logger.info("ollama_stream_start", base_url=base, model=model)
 
+        started = time.perf_counter()
+        first_token = None
+        completed = False
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                async with client.stream(
-                    "POST",
-                    f"{base}/api/chat",
-                    json=payload,
-                ) as response:
-                    if response.status_code >= 400:
-                        body = await response.aread()
-                        text = body.decode(errors="replace")[:500]
-                        logger.error(
-                            "ollama_http_error",
-                            status=response.status_code,
-                            body=text,
-                            model=model,
-                            base_url=base,
+            client = self._http()
+            async with client.stream(
+                "POST",
+                f"{base}/api/chat",
+                json=payload,
+            ) as response:
+                if response.status_code >= 400:
+                    body = await response.aread()
+                    text = body.decode(errors="replace")[:500]
+                    logger.error(
+                        "ollama_http_error",
+                        status=response.status_code,
+                        body=text,
+                        model=model,
+                        base_url=base,
+                    )
+                    # Force re-resolve next time
+                    self._resolved_base = None
+                    self._model_cache = None
+                    if response.status_code == 404:
+                        raise RuntimeError(
+                            f"Model '{model}' олдсонгүй. Ажиллуул: "
+                            f"docker exec -it chatbot-ollama ollama pull {settings.OLLAMA_MODEL}"
                         )
-                        # Force re-resolve next time
-                        self._resolved_base = None
-                        if response.status_code == 404:
-                            raise RuntimeError(
-                                f"Model '{model}' олдсонгүй. Ажиллуул: "
-                                f"docker exec -it chatbot-ollama ollama pull {settings.OLLAMA_MODEL}"
-                            )
-                        raise RuntimeError(f"Ollama error {response.status_code}: {text}")
+                    raise RuntimeError(f"Ollama error {response.status_code}: {text}")
 
-                    async for line in response.aiter_lines():
-                        if should_stop():
-                            logger.info("generation_stopped_by_user")
-                            break
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if data.get("done"):
-                            break
-                        # Some Ollama builds put error in stream body
-                        if data.get("error"):
-                            raise RuntimeError(str(data["error"]))
-                        content = data.get("message", {}).get("content", "")
-                        if content:
-                            yield content
+                async for line in response.aiter_lines():
+                    if should_stop():
+                        logger.info("generation_stopped_by_user")
+                        break
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    # Some Ollama builds put error in stream body
+                    if data.get("error"):
+                        raise RuntimeError(str(data["error"]))
+                    content = data.get("message", {}).get("content", "")
+                    if content:
+                        if first_token is None:
+                            first_token = time.perf_counter() - started
+                        yield content
+                    if data.get("done"):
+                        completed = True
+                        if metrics is not None:
+                            metrics.update({
+                                "first_token_ms": round(first_token * 1000) if first_token is not None else None,
+                                "total_ms": round((time.perf_counter() - started) * 1000),
+                                "output_tokens": data.get("eval_count"),
+                                "prompt_tokens": data.get("prompt_eval_count"),
+                                "done_reason": data.get("done_reason"),
+                            })
+                        break
+            if not completed and not should_stop():
+                raise RuntimeError("Ollama stream ended before completion. Please retry.")
         except httpx.ConnectError as e:
             self._resolved_base = None
+            self._model_cache = None
             logger.error("ollama_stream_connect_failed", base_url=base, error=str(e))
             raise RuntimeError(
                 f"Ollama-д холбогдож чадсангүй ({base}). "

@@ -1,6 +1,7 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Plus_Jakarta_Sans, Outfit } from "next/font/google";
 import { Toaster } from "sonner";
+import { ClientPreferences } from "@/components/ClientPreferences";
 import "./globals.css";
 
 const sans = Plus_Jakarta_Sans({
@@ -16,9 +17,14 @@ const display = Outfit({
 });
 
 export const metadata: Metadata = {
-  title: "NKMZ Chat — Qwen3 8B",
-  description: "Local AI chatbot powered by Ollama Qwen3 8B",
+  title: "NKMZ Chat — Local AI",
+  description: "Your local AI workspace powered by Ollama",
+  // Installed-app metadata; the manifest itself comes from app/manifest.ts.
+  appleWebApp: { capable: true, title: "NKMZ Chat", statusBarStyle: "black-translucent" },
+  icons: { icon: "/icons/icon-192.png", apple: "/icons/apple-touch-icon.png" },
 };
+
+export const viewport: Viewport = { themeColor: "#000000" };
 
 export default function RootLayout({
   children,
@@ -26,13 +32,15 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark" suppressHydrationWarning>
+    <html lang="mn" className="dark" suppressHydrationWarning>
       <body
         className={`${sans.variable} ${display.variable} font-sans antialiased`}
       >
+        <ClientPreferences />
         {children}
-        <Toaster richColors position="top-center" theme="system" />
+        <Toaster richColors position="top-center" theme="dark" />
       </body>
     </html>
   );
 }
+

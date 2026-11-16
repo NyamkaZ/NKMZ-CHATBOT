@@ -1,10 +1,10 @@
 import uuid
-from datetime import datetime, timezone
 from typing import Annotated, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header, Query
-from sqlalchemy import select, desc, func
+from sqlalchemy import select, desc, func, or_
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,22 +20,24 @@ from app.schemas.chat import (
     MessageOut,
     SendMessageRequest,
     SendMessageResponse,
+    RegenerateMessageRequest,
 )
 from app.api.v1.deps import (
     get_current_user_optional,
     get_current_user,
     require_login_for_second_message,
 )
-from app.services.usage import check_and_increment_usage, get_usage
+from app.services.usage import enforce_usage, get_usage
 from app.services.generation import (
     is_generation_active,
     set_active_generation,
     start_generation_task,
     request_stop,
     get_generation_state,
-    clear_active_generation,
 )
 from app.services.llm.ollama import ollama_service
+from app.services.answering import prepare_answer, suggest_title
+from app.services.ownership import chat_owner_filter, owns_chat
 import structlog
 
 logger = structlog.get_logger()
@@ -48,6 +50,7 @@ def _chat_out(chat) -> ChatOut:
         user_id=chat.user_id,
         guest_id=chat.guest_id,
         is_title_generated=bool(getattr(chat, "is_title_generated", False)),
+        is_pinned=bool(getattr(chat, "is_pinned", False)),
         channel=getattr(chat, "channel", None) or "web",
         created_at=chat.created_at,
         updated_at=chat.updated_at,
@@ -69,18 +72,30 @@ async def list_personas():
 async def list_chats(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[Optional[User], Depends(get_current_user_optional)],
-    q: Optional[str] = Query(None, description="Search title"),
-    limit: int = Query(50, le=100),
+    q: Optional[str] = Query(None, max_length=200, description="Search titles and message text"),
+    limit: int = Query(50, ge=1, le=100),
 ):
     if not user:
         return []
 
-    query = select(Chat).where(
-        (Chat.user_id == user.id) | (Chat.guest_id == user.guest_id)
-    ).order_by(desc(Chat.updated_at)).limit(limit)
+    query = (
+        select(Chat)
+        .where(chat_owner_filter(user))
+        .order_by(desc(Chat.is_pinned), desc(Chat.updated_at))
+        .limit(limit)
+    )
 
-    if q:
-        query = query.where(Chat.title.ilike(f"%{q}%"))
+    term = (q or "").strip()
+    if term:
+        # Match the typed text literally: % and _ are not wildcards here.
+        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        in_messages = (
+            select(Message.id)
+            .where(Message.chat_id == Chat.id, Message.content.ilike(pattern, escape="\\"))
+            .exists()
+        )
+        query = query.where(or_(Chat.title.ilike(pattern, escape="\\"), in_messages))
 
     result = await db.execute(query)
     chats = result.scalars().all()
@@ -92,6 +107,7 @@ async def list_chats(
                 id=c.id,
                 title=c.title,
                 is_title_generated=c.is_title_generated,
+                is_pinned=bool(c.is_pinned),
                 updated_at=c.updated_at,
             )
         )
@@ -116,7 +132,7 @@ async def create_chat(
     db.add(chat)
     await db.commit()
     await db.refresh(chat)
-    return chat
+    return _chat_out(chat)
 
 
 @router.get("/{chat_id}", response_model=ChatOut)
@@ -135,14 +151,10 @@ async def get_chat(
         raise HTTPException(404, "Chat not found")
 
     # Ownership check
-    if user:
-        if chat.user_id and chat.user_id != user.id:
-            if not (user.is_guest and chat.guest_id == user.guest_id):
-                raise HTTPException(403, "Not your chat")
-        if chat.guest_id and user.guest_id != chat.guest_id and chat.user_id != user.id:
-            raise HTTPException(403, "Not your chat")
-    else:
+    if not user:
         raise HTTPException(401, "Auth required")
+    if not owns_chat(user, chat):
+        raise HTTPException(403, "Not your chat")
 
     return chat
 
@@ -154,13 +166,18 @@ async def update_chat(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ):
-    result = await db.execute(select(Chat).where(Chat.id == chat_id))
+    result = await db.execute(select(Chat).options(selectinload(Chat.messages)).where(Chat.id == chat_id))
     chat = result.scalar_one_or_none()
-    if not chat or (chat.user_id != user.id and chat.guest_id != user.guest_id):
+    if not chat or not owns_chat(user, chat):
         raise HTTPException(404, "Chat not found")
     if data.title is not None:
         chat.title = data.title
         chat.is_title_generated = True
+    elif data.is_pinned is not None:
+        # Pinning is not activity: keep the last-updated time as it was.
+        flag_modified(chat, "updated_at")
+    if data.is_pinned is not None:
+        chat.is_pinned = data.is_pinned
     await db.commit()
     await db.refresh(chat)
     return chat
@@ -174,8 +191,15 @@ async def delete_chat(
 ):
     result = await db.execute(select(Chat).where(Chat.id == chat_id))
     chat = result.scalar_one_or_none()
-    if not chat or (chat.user_id != user.id and chat.guest_id != user.guest_id):
+    if not chat or not owns_chat(user, chat):
         raise HTTPException(404, "Chat not found")
+    active_messages = await db.execute(select(Message).where(
+        Message.chat_id == chat.id,
+        Message.status.in_([MessageStatus.PENDING, MessageStatus.THINKING, MessageStatus.STREAMING]),
+    ))
+    for message in active_messages.scalars():
+        if message.generation_id:
+            await request_stop(message.generation_id)
     await db.delete(chat)
     await db.commit()
 
@@ -194,11 +218,6 @@ async def send_message(
     - Starts background generation task
     - Returns immediately so the UI can start listening to the stream
     """
-    # Usage limits
-    allowed, used, limit, msg = await check_and_increment_usage(db, user)
-    if not allowed:
-        raise HTTPException(status_code=429, detail=msg)
-
     # Resolve or create chat
     chat: Optional[Chat] = None
     if data.chat_id:
@@ -210,7 +229,7 @@ async def send_message(
         chat = result.scalar_one_or_none()
         if not chat:
             raise HTTPException(404, "Chat not found")
-        if chat.user_id != user.id and chat.guest_id != user.guest_id:
+        if not owns_chat(user, chat):
             raise HTTPException(403, "Not your chat")
     else:
         chat = Chat(
@@ -222,13 +241,15 @@ async def send_message(
         db.add(chat)
         await db.flush()
 
-    # One message at a time per chat: reject the new send instead of
-    # starting a second competing generation task on the same chat.
-    if await is_generation_active(str(chat.id)):
-        raise HTTPException(
-            status_code=409,
-            detail="Энэ чат дээр хариу үүсэж байна. Дуусахыг хүлээнэ үү.",
-        )
+    generation_id = str(uuid.uuid4())
+    if not await set_active_generation(str(chat.id), generation_id):
+        raise HTTPException(409, "Generation already in progress")
+    try:
+        await enforce_usage(db, user)
+    except BaseException:
+        from app.services.generation import clear_active_generation
+        await clear_active_generation(str(chat.id), generation_id)
+        raise
 
     # Create user message
     user_msg = Message(
@@ -241,7 +262,6 @@ async def send_message(
     await db.flush()
 
     # Create placeholder assistant message
-    generation_id = str(uuid.uuid4())
     assistant_msg = Message(
         chat_id=chat.id,
         role=MessageRole.ASSISTANT,
@@ -254,10 +274,13 @@ async def send_message(
     await db.flush()
 
     # Mark chat as having active generation
-    await set_active_generation(str(chat.id), generation_id)
-    # A freshly flushed user_msg may not have created_at populated yet.
-    chat.updated_at = datetime.now(timezone.utc)
-    await db.commit()
+    chat.updated_at = user_msg.created_at
+    try:
+        await db.commit()
+    except BaseException:
+        from app.services.generation import clear_active_generation
+        await clear_active_generation(str(chat.id), generation_id)
+        raise
     await db.refresh(user_msg)
     await db.refresh(assistant_msg)
     await db.refresh(chat)
@@ -269,12 +292,13 @@ async def send_message(
             Message.chat_id == chat.id,
             Message.id != assistant_msg.id,
         )
-        .order_by(Message.created_at.asc())
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(max(2, settings.MAX_HISTORY_MESSAGES))
     )
-    prior = hist_result.scalars().all()
+    prior = list(reversed(hist_result.scalars().all()))
     history = []
     for m in prior:
-        if not m.content:
+        if not m.content or (m.role == MessageRole.ASSISTANT and m.status != MessageStatus.COMPLETED):
             continue
         role = m.role.value if hasattr(m.role, "value") else str(m.role)
         if role in ("user", "assistant", "system"):
@@ -284,23 +308,9 @@ async def send_message(
         if not history or history[-1].get("content") != data.content:
             history.append({"role": "user", "content": data.content})
 
-    user_count = sum(1 for m in prior if m.role == MessageRole.USER)
-    is_first = user_count <= 1
+    is_first = not chat.is_title_generated
 
-    hits = []
-    rag_block = ""
-    try:
-        from app.services.rag.pipeline import query_knowledge, build_rag_context
-        import asyncio as _aio
-
-        hits = await _aio.wait_for(
-            query_knowledge(data.content, top_k=settings.RAG_TOP_K),
-            timeout=5.0,
-        )
-        rag_block = build_rag_context(hits)
-    except Exception:
-        hits = []
-        rag_block = ""
+    system_prompt, hits = await prepare_answer(data.content, data.persona)
 
     # 2) FAQ таарвал LLMгүйгээр хариу
     direct = None
@@ -317,9 +327,12 @@ async def send_message(
         assistant_msg.content = direct
         assistant_msg.status = MessageStatus.COMPLETED
         assistant_msg.model_name = "rag-direct"
+        if not chat.is_title_generated:
+            chat.title = suggest_title(data.content)
+            chat.is_title_generated = True
         await db.commit()
         await db.refresh(assistant_msg)
-        await clear_active_generation(str(chat.id))
+        await clear_active_generation(str(chat.id), generation_id)
         try:
             await _publish(generation_id, "token", {"token": direct})
             await _publish(
@@ -348,42 +361,6 @@ async def send_message(
             user_message=MessageOut.model_validate(user_msg),
             assistant_message=MessageOut.model_validate(assistant_msg),
             usage=usage,
-        )
-
-    from app.services.personas import persona_system_addon
-
-    persona_extra = persona_system_addon(data.persona)
-    system_prompt = (
-        "You are the official NKMZ Chat assistant. "
-        "Answer in the same language the user writes in (Mongolian or English). "
-        "Be warm, clear, and concise. "
-        "If unsure, say you do not know. Never invent prices, hours, or phone numbers. "
-        "No chain-of-thought; give the final answer only."
-    )
-    if persona_extra:
-        system_prompt = f"{system_prompt}\n\n{persona_extra}"
-
-    if rag_block and history:
-        last = dict(history[-1])
-        q = last.get("content") or data.content
-        last["content"] = (
-            "[KNOWLEDGE BASE]\n"
-            + rag_block
-            + "\n\n[QUESTION]\n"
-            + q
-            + "\n\n[INSTRUCTIONS]\n"
-            "Answer using the knowledge base for company facts. "
-            "«Цагийн хуваарь» / «ажлын цаг» = working hours (e.g. 09:00–18:00), "
-            "NOT timezone (UTC+8). "
-            "Copy numbers exactly. If not in the knowledge base, say you don't have that info."
-        )
-        history = history[:-1] + [last]
-        system_prompt = (
-            "You are the official NKMZ Chat assistant. "
-            "Priority: KNOWLEDGE BASE in the user message over general knowledge. "
-            "For hours, prices, phone, address, policies — use ONLY the knowledge base. "
-            "«Цагийн хуваарь» means working hours, never a timezone. "
-            "Be concise. Answer in the user's language. No chain-of-thought."
         )
 
     # Start background generation (always in-process; never silently queue)
@@ -448,6 +425,10 @@ async def stop_generation(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ):
+    chat_result = await db.execute(select(Chat).where(Chat.id == chat_id))
+    chat = chat_result.scalar_one_or_none()
+    if not chat or not owns_chat(user, chat):
+        raise HTTPException(404, "Chat not found")
     result = await db.execute(select(Message).where(Message.id == message_id))
     msg = result.scalar_one_or_none()
     if not msg or msg.chat_id != chat_id:
@@ -464,60 +445,78 @@ async def regenerate(
     message_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
+    data: Optional[RegenerateMessageRequest] = None,
 ):
     """Regenerate the last assistant response (or a specific one)."""
     result = await db.execute(
         select(Chat).options(selectinload(Chat.messages)).where(Chat.id == chat_id)
     )
     chat = result.scalar_one_or_none()
-    if not chat or (chat.user_id != user.id and chat.guest_id != user.guest_id):
+    if not chat or not owns_chat(user, chat):
         raise HTTPException(404, "Chat not found")
-
-    if await is_generation_active(str(chat.id)):
-        raise HTTPException(
-            status_code=409,
-            detail="Энэ чат дээр хариу үүсэж байна. Дуусахыг хүлээнэ үү.",
-        )
 
     # Find the target assistant message
     target = None
-    for m in sorted(chat.messages, key=lambda x: x.created_at):
-        if m.id == message_id:
+    for m in chat.messages:
+        if m.id == message_id and m.role == MessageRole.ASSISTANT:
             target = m
             break
-    if not target or target.role != MessageRole.ASSISTANT:
+    if not target:
         raise HTTPException(404, "Assistant message not found")
+    if user.is_guest and target.status != MessageStatus.FAILED:
+        raise HTTPException(403, "Please login to regenerate this response")
+    if target.id != chat.messages[-1].id:
+        raise HTTPException(400, "Only the latest assistant response can be regenerated")
 
-    # Find the user message that produced it
-    user_content = ""
-    ordered = sorted(chat.messages, key=lambda x: x.created_at)
-    for i, m in enumerate(ordered):
-        if m.id == target.id:
-            for prev in reversed(ordered[:i]):
-                if prev.role == MessageRole.USER:
-                    user_content = prev.content
-                    break
-            break
+    # Find the preceding user message by position: timestamps can tie.
+    position = next(i for i, m in enumerate(chat.messages) if m.id == target.id)
+    user_content = next(
+        (m.content for m in reversed(chat.messages[:position]) if m.role == MessageRole.USER), ""
+    )
+    if not user_content:
+        raise HTTPException(400, "No preceding user message")
 
     generation_id = str(uuid.uuid4())
+    if not await set_active_generation(str(chat.id), generation_id):
+        raise HTTPException(409, "Generation already in progress")
+
+    # Usage
+    try:
+        await enforce_usage(db, user)
+    except BaseException:
+        from app.services.generation import clear_active_generation
+        await clear_active_generation(str(chat.id), generation_id)
+        raise
+
+    # Reset the message
     target.content = ""
     target.status = MessageStatus.THINKING
     target.generation_id = generation_id
     target.error_message = None
-    await set_active_generation(str(chat.id), generation_id)
+    try:
+        await db.commit()
+    except BaseException:
+        from app.services.generation import clear_active_generation
+        await clear_active_generation(str(chat.id), generation_id)
+        raise
+    await db.refresh(target)
 
     # History up to (but not including) the target
     history = []
     for m in chat.messages:
         if m.id == target.id:
             break
-        history.append({"role": m.role.value, "content": m.content})
+        if m.content and (m.role != MessageRole.ASSISTANT or m.status == MessageStatus.COMPLETED):
+            history.append({"role": m.role.value, "content": m.content})
+
+    system_prompt, _ = await prepare_answer(user_content, data.persona if data else None)
 
     start_generation_task(
         generation_id=generation_id,
         message_id=str(target.id),
         chat_id=str(chat.id),
         history=history,
+        system_prompt=system_prompt,
         is_first_message=False,
         user_message_content=user_content,
     )

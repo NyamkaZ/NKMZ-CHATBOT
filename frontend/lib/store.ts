@@ -3,6 +3,21 @@ import { api } from "./api";
 import type { Locale, TranslationKey } from "./i18n";
 import { translate } from "./i18n";
 
+let guestRequest: Promise<void> | null = null;
+let authVersion = 0;
+let chatListRequest = 0;
+let historyRequest = 0;
+
+/** Pinned conversations first, then most recently updated. Mirrors the server order. */
+export function sortChats<T extends { is_pinned?: boolean; updated_at: string }>(chats: T[]): T[] {
+  return [...chats].sort((a, b) =>
+    Number(!!b.is_pinned) - Number(!!a.is_pinned) || (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
+}
+
+function closeStreams() {
+  Object.values(useChatStore.getState().generating).forEach((g) => g.eventSource?.close());
+}
+
 export type MessageStatus =
   | "pending"
   | "thinking"
@@ -27,6 +42,7 @@ export interface Chat {
   id: string;
   title: string;
   is_title_generated: boolean;
+  is_pinned?: boolean;
   updated_at: string;
   messages?: Message[];
 }
@@ -46,6 +62,7 @@ export interface AuthUser {
   role: string;
   is_guest: boolean;
   is_active?: boolean;
+  email_verified?: boolean;
 }
 
 interface GeneratingState {
@@ -60,12 +77,15 @@ interface GeneratingState {
 interface ChatState {
   chats: Chat[];
   currentChatId: string | null;
+  currentChatTitle: string | null;
   messagesByChat: Record<string, Message[]>;
   generating: Record<string, GeneratingState>;
   usage: Usage | null;
   user: AuthUser | null;
   authLoaded: boolean;
   isLoadingChats: boolean;
+  chatListError: boolean;
+  historyError: boolean;
   isSending: boolean;
   searchQuery: string;
   sidebarOpen: boolean;
@@ -80,12 +100,15 @@ interface ChatState {
   setSidebarOpen: (v: boolean) => void;
   setSearchQuery: (q: string) => void;
   loadAuth: () => Promise<void>;
+  resetSession: () => void;
   logout: () => void;
   loadChats: () => Promise<void>;
   selectChat: (chatId: string | null) => Promise<void>;
   createNewChat: () => void;
   deleteChat: (chatId: string) => Promise<void>;
   renameChat: (chatId: string, title: string) => Promise<void>;
+  pinChat: (chatId: string, pinned: boolean) => Promise<void>;
+  updateProfile: (fullName: string) => Promise<void>;
   sendMessage: (content: string) => Promise<void>;
   stopGenerating: (chatId: string) => Promise<void>;
   regenerate: (chatId: string, messageId: string) => Promise<void>;
@@ -104,15 +127,18 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set, get) => ({
   chats: [],
   currentChatId: null,
+  currentChatTitle: null,
   messagesByChat: {},
   generating: {},
   usage: null,
   user: null,
   authLoaded: false,
   isLoadingChats: false,
+  chatListError: false,
+  historyError: false,
   isSending: false,
   searchQuery: "",
-  sidebarOpen: true,
+  sidebarOpen: false,
   theme: "dark",
   locale: "mn",
   persona: "default",
@@ -122,17 +148,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (typeof window !== "undefined") localStorage.setItem("persona", p);
   },
 
-  setTheme: (t) => {
-    set({ theme: t });
+  setTheme: () => {
+    set({ theme: "dark" });
     if (typeof document !== "undefined") {
-      document.documentElement.classList.toggle("dark", t === "dark");
-      localStorage.setItem("theme", t);
+      document.documentElement.classList.add("dark");
+      localStorage.setItem("theme", "dark");
     }
   },
 
   setLocale: (l) => {
     set({ locale: l });
-    if (typeof window !== "undefined") localStorage.setItem("locale", l);
+    if (typeof window !== "undefined") {
+      try { localStorage.setItem("locale", l); } catch { /* Private browsing may disable storage. */ }
+    }
   },
 
   t: (key) => translate(get().locale, key),
@@ -141,43 +169,66 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSearchQuery: (q) => set({ searchQuery: q }),
 
   loadAuth: async () => {
+    const version = authVersion;
     if (typeof window === "undefined") return;
     const token = localStorage.getItem("access_token");
-    if (!token) {
+    if (!token && !localStorage.getItem("guest_id")) {
       set({ user: null, authLoaded: true });
       return;
     }
     try {
       const me = (await api.me()) as AuthUser;
+      if (version !== authVersion) return;
+      if (get().user && get().user?.id !== me.id) {
+        get().resetSession();
+      }
       set({ user: me, authLoaded: true });
-    } catch {
-      // Invalid/expired token — clear and allow guest flow
-      localStorage.removeItem("access_token");
-      set({ user: null, authLoaded: true });
+    } catch (error) {
+      if (version !== authVersion) return;
+      if ((error as { status?: number }).status === 401) {
+        get().resetSession();
+        localStorage.removeItem("access_token");
+        localStorage.removeItem("guest_id");
+      }
+      set({ authLoaded: true });
     }
   },
 
+  resetSession: () => {
+    authVersion++;
+    guestRequest = null;
+    closeStreams();
+    set({
+      user: null,
+      chats: [],
+      currentChatId: null,
+      currentChatTitle: null,
+      messagesByChat: {},
+      generating: {},
+      isSending: false,
+      isLoadingChats: false,
+      chatListError: false,
+      historyError: false,
+      searchQuery: "",
+      usage: null,
+      authLoaded: true,
+    });
+  },
+
   logout: () => {
+    get().resetSession();
     if (typeof window !== "undefined") {
       localStorage.removeItem("access_token");
       localStorage.removeItem("guest_id");
       localStorage.setItem("auth_logout", String(Date.now()));
     }
-    set({
-      user: null,
-      chats: [],
-      currentChatId: null,
-      messagesByChat: {},
-      usage: null,
-      authLoaded: true,
+    const version = authVersion;
+    void get().ensureGuest().then(() => {
+      if (version !== authVersion) return;
+      return Promise.all([get().loadAuth(), get().loadChats(), get().loadUsage()]);
+    }).catch(() => {
+      if (version === authVersion) set({ chatListError: true });
     });
-    get()
-      .ensureGuest()
-      .then(() => {
-        get().loadAuth();
-        get().loadChats();
-        get().loadUsage();
-      });
   },
 
   ensureGuest: async () => {
@@ -189,143 +240,103 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (localStorage.getItem("access_token") || localStorage.getItem("guest_id")) {
       return;
     }
-    try {
-      const data = await api.createGuest();
-      localStorage.setItem("guest_id", data.guest_id);
-      if (data.access_token) localStorage.setItem("access_token", data.access_token);
-    } catch (e) {
-      console.error("Guest session failed", e);
-    }
+    if (guestRequest) return guestRequest;
+    guestRequest = (async () => {
+      const version = authVersion;
+      try {
+        const data = await api.createGuest();
+        if (version !== authVersion || localStorage.getItem("access_token")) return;
+        localStorage.setItem("guest_id", data.guest_id);
+        if (data.access_token) localStorage.setItem("access_token", data.access_token);
+      } finally {
+        if (version === authVersion) guestRequest = null;
+      }
+    })();
+    return guestRequest;
   },
 
   loadChats: async () => {
-    set({ isLoadingChats: true });
+    const version = authVersion;
+    const request = ++chatListRequest;
+    const query = get().searchQuery;
+    set({ isLoadingChats: true, chatListError: false });
     try {
       await get().ensureGuest();
-      const list = (await api.listChats(get().searchQuery || undefined)) as Chat[];
+      if (version !== authVersion || request !== chatListRequest || query !== get().searchQuery) return;
+      const list = (await api.listChats(query || undefined)) as Chat[];
+      if (version !== authVersion || request !== chatListRequest || query !== get().searchQuery) return;
       set({ chats: list });
     } catch (e) {
-      console.error(e);
+      if (version === authVersion && request === chatListRequest && query === get().searchQuery) {
+        set({ chatListError: true });
+      }
     } finally {
-      set({ isLoadingChats: false });
+      if (version === authVersion && request === chatListRequest) set({ isLoadingChats: false });
     }
   },
 
   selectChat: async (chatId) => {
-    set({ currentChatId: chatId });
+    const version = authVersion;
+    const request = ++historyRequest;
+    const summary = get().chats.find(chat => chat.id === chatId);
+    const selectedTitle = summary?.title ?? (get().currentChatId === chatId ? get().currentChatTitle : null);
+    set({ currentChatId: chatId, currentChatTitle: selectedTitle, historyError: false });
     if (!chatId) return;
 
     const existing = get().messagesByChat[chatId];
-    const gen = get().generating[chatId];
-
-    // Re-attach live stream if generation still running
-    if (
-      gen &&
-      gen.status !== "completed" &&
-      gen.status !== "stopped" &&
-      gen.status !== "failed"
-    ) {
-      if (!gen.eventSource || gen.eventSource.readyState === EventSource.CLOSED) {
-        attachStream(chatId, gen.generationId, gen.messageId, gen.content);
+    const running = get().generating[chatId];
+    if (running && existing && ["pending", "thinking", "streaming"].includes(running.status)) {
+      if (!running.eventSource || running.eventSource.readyState === EventSource.CLOSED) {
+        attachStream(chatId, running.generationId, running.messageId, running.content);
       }
-      if (existing && existing.length > 0) return;
-    }
-
-    if (existing && existing.length > 0 && !gen) {
-      // Still refresh in background in case message finished while away
-      api
-        .getChat(chatId)
-        .then((chat: any) => {
-          set((s) => ({
-            messagesByChat: {
-              ...s.messagesByChat,
-              [chatId]: chat.messages || [],
-            },
-            chats: s.chats.map((c) =>
-              c.id === chatId
-                ? {
-                    ...c,
-                    title: chat.title,
-                    is_title_generated: chat.is_title_generated,
-                    updated_at: chat.updated_at,
-                  }
-                : c
-            ),
-          }));
-          const last = [...(chat.messages || [])]
-            .reverse()
-            .find((m: Message) => m.role === "assistant");
-          if (
-            last?.generation_id &&
-            (last.status === "thinking" || last.status === "streaming")
-          ) {
-            attachStream(chatId, last.generation_id, last.id, last.content || "");
-          }
-        })
-        .catch(console.error);
       return;
     }
 
+    const stillCurrent = () => version === authVersion && request === historyRequest &&
+      get().currentChatId === chatId && get().messagesByChat[chatId] === existing;
     try {
       const chat = (await api.getChat(chatId)) as Chat & { messages: Message[] };
+      // A late refresh must not remove a turn added after the request started.
+      if (!stillCurrent()) return;
       set((s) => ({
-        messagesByChat: { ...s.messagesByChat, [chatId]: chat.messages || [] },
-        chats: s.chats.map((c) =>
-          c.id === chatId
-            ? {
-                ...c,
-                title: chat.title,
-                is_title_generated: chat.is_title_generated,
-                updated_at: chat.updated_at,
-              }
-            : c
-        ),
+        currentChatTitle: s.currentChatTitle === selectedTitle ? chat.title : s.currentChatTitle,
+        messagesByChat: { ...s.messagesByChat, [chatId]: chat.messages },
+        chats: s.chats.map(item => item === summary
+          ? { ...item, title: chat.title, updated_at: chat.updated_at, is_title_generated: chat.is_title_generated, is_pinned: chat.is_pinned }
+          : item),
       }));
 
-      const last = [...(chat.messages || [])]
-        .reverse()
-        .find((m) => m.role === "assistant");
-      if (
-        last?.generation_id &&
-        (last.status === "thinking" || last.status === "streaming")
-      ) {
-        attachStream(chatId, last.generation_id, last.id, last.content || "");
+      const last = chat.messages.findLast(message => message.role === "assistant");
+      if (last?.generation_id && ["pending", "thinking", "streaming"].includes(last.status)) {
+        attachStream(chatId, last.generation_id, last.id, last.content);
       }
-    } catch (e) {
-      console.error(e);
+    } catch {
+      if (stillCurrent()) set({ historyError: true });
     }
   },
 
   createNewChat: () => {
-    set({ currentChatId: null });
+    historyRequest++;
+    set({ currentChatId: null, currentChatTitle: null, historyError: false });
   },
 
   deleteChat: async (chatId: string) => {
-    try {
-      const gen = get().generating[chatId];
-      if (gen) {
-        gen.eventSource?.close();
-        try {
-          await api.stopGeneration(chatId, gen.messageId);
-        } catch {
-          /* ignore */
-        }
-      }
-      await api.deleteChat(chatId);
-      set((s) => {
-        const { [chatId]: _m, ...messagesByChat } = s.messagesByChat;
-        const { [chatId]: _g, ...generating } = s.generating;
-        return {
-          chats: s.chats.filter((c) => c.id !== chatId),
-          messagesByChat,
-          generating,
-          currentChatId: s.currentChatId === chatId ? null : s.currentChatId,
-        };
-      });
-    } catch (e) {
-      console.error(e);
-      throw e;
-    }
+    const version = authVersion;
+    await api.deleteChat(chatId); // The server also stops any active generation.
+    if (version !== authVersion) return;
+    get().generating[chatId]?.eventSource?.close();
+    set((s) => {
+      const { [chatId]: _m, ...messagesByChat } = s.messagesByChat;
+      const { [chatId]: _g, ...generating } = s.generating;
+      return {
+        chats: s.chats.filter((c) => c.id !== chatId),
+        messagesByChat,
+        generating,
+        currentChatId: s.currentChatId === chatId ? null : s.currentChatId,
+        currentChatTitle: s.currentChatId === chatId ? null : s.currentChatTitle,
+      };
+    });
+    if (get().isLoadingChats) void get().loadChats();
   },
 
   renameChat: async (chatId: string, title: string) => {
@@ -333,6 +344,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!trimmed) return;
     await api.renameChat(chatId, trimmed);
     get().updateChatTitle(chatId, trimmed);
+  },
+
+  pinChat: async (chatId, pinned) => {
+    const version = authVersion;
+    const apply = (value: boolean) => set((s) => ({
+      chats: sortChats(s.chats.map((c) => (c.id === chatId ? { ...c, is_pinned: value } : c))),
+    }));
+    apply(pinned); // optimistic: the row moves immediately
+    try {
+      await api.pinChat(chatId, pinned);
+    } catch (error) {
+      if (version === authVersion) apply(!pinned);
+      throw error;
+    }
+  },
+
+  updateProfile: async (fullName) => {
+    const version = authVersion;
+    const me = (await api.updateProfile(fullName)) as AuthUser;
+    if (version === authVersion) set({ user: me });
   },
 
   updateMessageContent: (chatId, messageId, content, status, error) => {
@@ -355,6 +386,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   updateChatTitle: (chatId, title) => {
     set((s) => ({
+      currentChatTitle: s.currentChatId === chatId ? title : s.currentChatTitle,
       chats: s.chats.map((c) =>
         c.id === chatId ? { ...c, title, is_title_generated: true } : c
       ),
@@ -362,27 +394,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   sendMessage: async (content: string) => {
-    const { currentChatId, generating } = get();
-    if (currentChatId && generating[currentChatId]) {
-      const g = generating[currentChatId];
-      if (g.status === "thinking" || g.status === "streaming") {
-        try { g.eventSource?.close(); } catch {}
-        set((s) => {
-          const { [currentChatId]: _, ...rest } = s.generating;
-          return { generating: rest };
-        });
-      }
-    }
+    const version = authVersion;
+    const selection = historyRequest;
+    const { currentChatId, generating, isSending } = get();
+    if (isSending || (currentChatId && generating[currentChatId])) return;
+    if (currentChatId && !get().messagesByChat[currentChatId]) throw new Error(get().t("historyUnavailable"));
 
     set({ isSending: true });
     try {
       await get().ensureGuest();
+      if (version !== authVersion) return;
       const persona = get().persona;
       const data: any = await api.sendMessage(
         content,
         currentChatId || undefined,
         persona
       );
+      if (version !== authVersion || (currentChatId && !get().messagesByChat[currentChatId])) return;
       const chat = data.chat as Chat;
       const userMsg = data.user_message as Message;
       const asstMsg = data.assistant_message as Message;
@@ -410,19 +438,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
               },
               ...s.chats,
             ];
+        const openSentChat = s.currentChatId === currentChatId && selection === historyRequest;
         return {
-          currentChatId: chat.id,
+          currentChatId: openSentChat ? chat.id : s.currentChatId,
+          currentChatTitle: openSentChat ? chat.title : s.currentChatTitle,
           messagesByChat: { ...s.messagesByChat, [chat.id]: msgs },
-          chats,
+          chats: s.searchQuery ? chats : sortChats(chats),
           usage: usage || s.usage,
         };
       });
 
-      if (asstMsg.generation_id) {
+      if (asstMsg.generation_id && ["pending", "thinking", "streaming"].includes(asstMsg.status)) {
         attachStream(chat.id, asstMsg.generation_id, asstMsg.id, "");
       }
     } finally {
-      set({ isSending: false });
+      if (version === authVersion) set({ isSending: false });
     }
   },
 
@@ -431,22 +461,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!gen) return;
     try {
       await api.stopGeneration(chatId, gen.messageId);
-      get().updateMessageContent(chatId, gen.messageId, gen.content, "stopped");
-      gen.eventSource?.close();
-      set((s) => {
-        const { [chatId]: _, ...rest } = s.generating;
-        return { generating: rest };
-      });
+      // Keep the stream attached until the server confirms the final content.
     } catch (e) {
       console.error(e);
     }
   },
 
   regenerate: async (chatId: string, messageId: string) => {
-    if (get().generating[chatId]) return;
+    const version = authVersion;
+    if (get().isSending || get().generating[chatId]) return;
     set({ isSending: true });
     try {
-      const data: any = await api.regenerate(chatId, messageId);
+      const data: any = await api.regenerate(chatId, messageId, get().persona);
+      if (version !== authVersion) return;
       const asstMsg = data.assistant_message as Message;
       set((s) => {
         const msgs = (s.messagesByChat[chatId] || []).map((m) =>
@@ -463,13 +490,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
         attachStream(chatId, asstMsg.generation_id, asstMsg.id, "");
       }
     } finally {
-      set({ isSending: false });
+      if (version === authVersion) set({ isSending: false });
     }
   },
 
   loadUsage: async () => {
+    const version = authVersion;
     try {
       const u = (await api.getUsage()) as Usage;
+      if (version !== authVersion) return;
       set({ usage: u });
     } catch {
       /* guests / unauth */
@@ -495,7 +524,8 @@ function attachStream(
 
   const url = api.streamUrl(generationId);
   const es = new EventSource(url);
-  let content = initialContent || prev?.content || "";
+  let content = initialContent;
+  const isCurrent = () => useChatStore.getState().generating[chatId]?.eventSource === es;
 
   const setGen = (partial: Partial<GeneratingState>) => {
     useChatStore.setState((s) => ({
@@ -517,6 +547,7 @@ function attachStream(
   setGen({ status: "thinking", content });
 
   const onThinking = () => {
+    if (!isCurrent()) return;
     setGen({ status: "thinking" });
     useChatStore
       .getState()
@@ -524,6 +555,7 @@ function attachStream(
   };
 
   const onStatus = (e: MessageEvent) => {
+    if (!isCurrent()) return;
     try {
       const data = JSON.parse(e.data);
       if (data.status === "streaming") {
@@ -538,9 +570,10 @@ function attachStream(
   };
 
   const onCatchup = (e: MessageEvent) => {
+    if (!isCurrent()) return;
     try {
       const data = JSON.parse(e.data);
-      content = data.content || content;
+      content = data.content ?? content;
       const st = (data.status as MessageStatus) || "streaming";
       setGen({ content, status: st });
       useChatStore.getState().updateMessageContent(chatId, messageId, content, st);
@@ -550,6 +583,7 @@ function attachStream(
   };
 
   const onToken = (e: MessageEvent) => {
+    if (!isCurrent()) return;
     try {
       const data = JSON.parse(e.data);
       content += data.token || "";
@@ -563,6 +597,7 @@ function attachStream(
   };
 
   const onTitle = (e: MessageEvent) => {
+    if (!isCurrent()) return;
     try {
       const data = JSON.parse(e.data);
       if (data.title && data.chat_id) {
@@ -578,6 +613,8 @@ function attachStream(
     finalContent?: string,
     error?: string | null
   ) => {
+    if (!isCurrent()) return;
+    clearTimeout(retryTimer);
     const final = finalContent ?? content;
     useChatStore
       .getState()
@@ -621,7 +658,7 @@ function attachStream(
     if (e.data) {
       try {
         const data = JSON.parse(e.data);
-        finish("failed", content, data.message || "Generation failed");
+        finish("failed", data.content ?? content, data.error || data.message || "Generation failed");
         return;
       } catch {
         /* fall through */
@@ -639,31 +676,21 @@ function attachStream(
   es.addEventListener("failed", onErrorEvent as EventListener);
   es.addEventListener("error", onErrorEvent as EventListener);
 
-  // Network blip: try reconnect a few times while generation may still run
-  let reconnectAttempts = 0;
-  const maxReconnect = 5;
+  // EventSource reconnects automatically. Bound the total outage time so the
+  // composer cannot stay disabled forever after an authorization/server failure.
+  let disconnectedAt: number | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  es.onopen = () => { disconnectedAt = null; clearTimeout(retryTimer); };
   es.onerror = () => {
-    if (es.readyState === EventSource.CLOSED) {
-      const still = useChatStore.getState().generating[chatId];
-      if (
-        still &&
-        still.generationId === generationId &&
-        (still.status === "thinking" || still.status === "streaming") &&
-        reconnectAttempts < maxReconnect
-      ) {
-        reconnectAttempts += 1;
-        const delay = Math.min(1000 * reconnectAttempts, 5000);
-        setTimeout(() => {
-          const cur = useChatStore.getState().generating[chatId];
-          if (
-            cur &&
-            cur.generationId === generationId &&
-            (cur.status === "thinking" || cur.status === "streaming")
-          ) {
-            attachStream(chatId, generationId, messageId, content);
-          }
-        }, delay);
+    if (!isCurrent()) return;
+    disconnectedAt ??= Date.now();
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => {
+      if (!isCurrent() || disconnectedAt === null) return;
+      if (es.readyState === EventSource.CLOSED || Date.now() - disconnectedAt >= 15000) {
+        finish("failed", content, "Connection lost. Reopen this chat to reconnect.");
       }
-    }
+    }, Math.max(0, 15000 - (Date.now() - disconnectedAt)));
   };
 }
+

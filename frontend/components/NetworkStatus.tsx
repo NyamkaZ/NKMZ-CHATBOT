@@ -7,7 +7,8 @@ import { useChatStore } from "@/lib/store";
 /** Offline banner + multi-tab logout sync */
 export function NetworkStatus() {
   const [online, setOnline] = useState(true);
-  const { logout, loadAuth } = useChatStore();
+  const loadAuth = useChatStore(s => s.loadAuth);
+  const locale = useChatStore(s => s.locale);
 
   useEffect(() => {
     const goOnline = () => {
@@ -34,17 +35,13 @@ export function NetworkStatus() {
     // Multi-tab logout
     const onStorage = (e: StorageEvent) => {
       if (e.key === "auth_logout") {
-        useChatStore.setState({
-          user: null,
-          chats: [],
-          currentChatId: null,
-          messagesByChat: {},
-          usage: null,
-        });
-        loadAuth().then(() => {
-          useChatStore.getState().ensureGuest();
-          useChatStore.getState().loadChats();
-        });
+        useChatStore.getState().resetSession();
+        (async () => {
+          await loadAuth();
+          await useChatStore.getState().ensureGuest();
+          await loadAuth();
+          await useChatStore.getState().loadChats();
+        })().catch(console.error);
       }
       if (e.key === "access_token" && e.newValue && e.oldValue !== e.newValue) {
         loadAuth();
@@ -57,13 +54,13 @@ export function NetworkStatus() {
       window.removeEventListener("offline", goOffline);
       window.removeEventListener("storage", onStorage);
     };
-  }, [loadAuth, logout]);
+  }, [loadAuth]);
 
   if (online) return null;
 
   return (
     <div className="fixed top-0 inset-x-0 z-[100] bg-destructive text-destructive-foreground text-center text-xs py-1.5 px-3">
-      {useChatStore.getState().locale === "mn"
+      {locale === "mn"
         ? "Интернет холболт байхгүй — зарим үйлдэл ажиллахгүй"
         : "No internet connection — some actions may fail"}
     </div>

@@ -6,7 +6,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx,.cjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.cjs"
   },
   "dependencies": {
     "@radix-ui/react-avatar": "^1.1.1",
@@ -19,8 +21,10 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
+    "gsap": "^3.15.1",
     "lucide-react": "^0.468.0",
-    "next": "14.2.18",
+    "motion": "^14.11.1",
+    "next": "15.5.29",
     "ogl": "^1.0.11",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -30,17 +34,31 @@
     "sonner": "^1.7.1",
     "swr": "^2.2.5",
     "tailwind-merge": "^2.5.5",
+    "three": "^0.187.0",
     "uuid": "^11.0.3",
     "zustand": "^5.0.2"
   },
   "devDependencies": {
+    "@tailwindcss/typography": "^0.5.20",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.14",
     "@types/react-dom": "^18.3.2",
+    "@types/three": "^0.187.0",
     "@types/uuid": "^10.0.0",
     "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.49",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^15.5.29",
+    "postcss": "^8.5.32",
     "tailwindcss": "^3.4.16",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "postcss": "$postcss",
+    "@tailwindcss/typography": {
+      "postcss-selector-parser": "^6.1.5"
+    },
+    "@typescript-eslint/typescript-estree": {
+      "minimatch": "^11.0.1"
+    }
   }
 }
