@@ -29,7 +29,24 @@ const STYLES = `
 .liquid-metal-button:focus-visible { outline: 2px solid #e5e5e5; outline-offset: 3px; }
 `;
 
-type ShaderHandle = { setSpeed?: (speed?: number) => void; dispose?: () => void; destroy?: () => void };
+type ShaderHandle = {
+  setSpeed?: (speed?: number) => void;
+  setUniforms?: (uniforms: Record<string, number>) => void;
+  dispose?: () => void;
+  destroy?: () => void;
+};
+
+/**
+ * The metal is drawn inside a circle whose diameter is `u_scale` times the
+ * button's height. The original 142x46 button used 8; a wider button needs a
+ * larger circle or the ring stops short of the right edge. The stripe count
+ * grows with it so the bands keep the same width on screen.
+ */
+function metalUniforms(width: number, height: number) {
+  const aspect = height > 0 ? width / height : 1;
+  const scale = Math.max(8, aspect * 2.6);
+  return { u_scale: scale, u_repetition: 4 * (scale / 8) };
+}
 
 export interface LiquidMetalButtonProps
   extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "children" | "style"> {
@@ -70,6 +87,7 @@ export function LiquidMetalButton({
   const [isPressed, setIsPressed] = useState(false);
   const [ripples, setRipples] = useState<Array<{ x: number; y: number; id: number }>>([]);
   const shaderRef = useRef<HTMLDivElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
   const shaderMount = useRef<ShaderHandle | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const rippleId = useRef(0);
@@ -94,33 +112,40 @@ export function LiquidMetalButton({
     }
     still.current = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     const pending = timers.current;
+    const frame = frameRef.current;
+    let observer: ResizeObserver | undefined;
     try {
-      if (shaderRef.current) {
+      if (shaderRef.current && frame) {
         shaderMount.current = new ShaderMount(
           shaderRef.current,
           liquidMetalFragmentShader,
           {
-            u_repetition: 4,
             u_softness: 0.5,
             u_shiftRed: 0.3,
             u_shiftBlue: 0.3,
             u_distortion: 0,
             u_contour: 0,
             u_angle: 45,
-            u_scale: 8,
             u_shape: 1,
             u_offsetX: 0.1,
             u_offsetY: -0.1,
+            ...metalUniforms(frame.clientWidth, frame.clientHeight),
           },
           undefined,
           still.current ? 0 : IDLE_SPEED,
         ) as ShaderHandle;
+        // Full-width buttons change size with the layout: keep the ring complete.
+        observer = new ResizeObserver(() => {
+          shaderMount.current?.setUniforms?.(metalUniforms(frame.clientWidth, frame.clientHeight));
+        });
+        observer.observe(frame);
       }
     } catch (error) {
       // Without WebGL the button still works; it just has a plain dark ring.
       console.warn("LiquidMetalButton: shader unavailable", error);
     }
     return () => {
+      observer?.disconnect();
       pending.forEach(clearTimeout);
       pending.clear();
       const mount = shaderMount.current;
@@ -175,6 +200,7 @@ export function LiquidMetalButton({
 
   return (
     <div
+      ref={frameRef}
       className={className}
       style={{
         position: "relative",
