@@ -3,7 +3,7 @@ const backend = process.env.INTERNAL_API_URL || "http://localhost:8000";
 
 const nextConfig = {
   reactStrictMode: true,
-  output: "standalone",
+  devIndicators: { position: "bottom-right" },
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${backend}/api/:path*` },
@@ -14,3 +14,4 @@ const nextConfig = {
 };
 
 export default nextConfig;
+

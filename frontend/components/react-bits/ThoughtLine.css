@@ -1,0 +1,11 @@
+.thought-line { color: #a3a3a3; max-width: 100%; padding: 4px 0 8px; }
+.thought-line__head { display: flex; align-items: center; flex-wrap: wrap; gap: .5em; text-align: left; }
+button.thought-line__head { border-radius: 4px; }
+button.thought-line__head:focus-visible { outline: 1px solid #a3a3a3; outline-offset: 4px; }
+.thought-line__timer { color: #737373; font-size: .85em; font-variant-numeric: tabular-nums; min-width: 4ch; }
+.thought-line__trace { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 350ms ease; }
+.thought-line__trace[data-open] { grid-template-rows: 1fr; }
+.thought-line__fold { min-height: 0; overflow: hidden; }
+.thought-line__steps { display: flex; flex-direction: column; gap: .5em; padding-top: .75em; font-size: .85em; color: #737373; }
+.thought-line__steps li { display: flex; align-items: center; gap: .6em; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .thought-line__trace { transition: none; } }

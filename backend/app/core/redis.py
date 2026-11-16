@@ -20,5 +20,5 @@ async def get_redis() -> aioredis.Redis:
 async def close_redis():
     global _redis
     if _redis:
-        await _redis.close()
+        await _redis.aclose()
         _redis = None

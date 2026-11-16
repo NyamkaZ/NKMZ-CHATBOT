@@ -4,7 +4,7 @@ import uuid
 from typing import Annotated, List, Optional
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException
+from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Query
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, ConfigDict
@@ -15,7 +15,8 @@ from app.core.config import settings
 from app.models.user import User
 from app.models.document import Document
 from app.api.v1.deps import get_admin_user
-from app.services.rag.pipeline import index_document
+from app.services.rag.pipeline import index_document, delete_indexed_document
+from starlette.concurrency import run_in_threadpool
 import structlog
 
 logger = structlog.get_logger()
@@ -84,21 +85,24 @@ async def upload_document(
     user: Annotated[User, Depends(get_admin_user)] = None,
 ):
     """Only admin can upload / index knowledge base documents."""
-    raw = await file.read()
+    raw = await file.read(MAX_SIZE + 1)
     if len(raw) > MAX_SIZE:
         raise HTTPException(400, "File too large (max 10 MB)")
     if not raw:
         raise HTTPException(400, "Empty file")
 
-    original = file.filename or "document.txt"
-    text = _extract_text(original, raw, file.content_type)
+    original = (file.filename or "document.txt").replace("\x00", "")[:512]
+    text = await run_in_threadpool(_extract_text, original, raw, file.content_type)
     if not text.strip():
         raise HTTPException(400, "No text content found in file")
 
     doc_id = uuid.uuid4()
-    safe_name = f"{doc_id}_{original.replace('/', '_')[:180]}"
+    suffix = Path(original).suffix.lower()
+    if suffix not in {".txt", ".md", ".csv", ".json", ".log", ".pdf"}:
+        suffix = ".pdf" if file.content_type == "application/pdf" else ".txt"
+    safe_name = f"{doc_id}{suffix}"
     path = UPLOAD_DIR / safe_name
-    path.write_bytes(raw)
+    await run_in_threadpool(path.write_bytes, raw)
 
     doc = Document(
         id=doc_id,
@@ -133,7 +137,7 @@ async def upload_document(
 async def list_documents(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_admin_user)],
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
 ):
     result = await db.execute(
         select(Document).order_by(desc(Document.created_at)).limit(limit)
@@ -151,6 +155,7 @@ async def delete_document(
     doc = result.scalar_one_or_none()
     if not doc:
         raise HTTPException(404, "Document not found")
+    await delete_indexed_document(str(doc.id))
     path = UPLOAD_DIR / doc.filename
     if path.exists():
         path.unlink(missing_ok=True)

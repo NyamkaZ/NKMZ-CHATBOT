@@ -4,12 +4,13 @@ import { useEffect } from "react";
 import { Sidebar } from "@/components/chat/Sidebar";
 import { ChatArea } from "@/components/chat/ChatArea";
 import { NetworkStatus } from "@/components/NetworkStatus";
-import Strands from "@/components/Strands";
-import { CommandPalette } from "@/components/chat/CommandPalette";
 import { useChatStore } from "@/lib/store";
 
 export default function HomePage() {
-  const { loadAuth, ensureGuest, loadUsage, loadChats } = useChatStore();
+  const loadAuth = useChatStore(s => s.loadAuth);
+  const ensureGuest = useChatStore(s => s.ensureGuest);
+  const loadUsage = useChatStore(s => s.loadUsage);
+  const loadChats = useChatStore(s => s.loadChats);
 
   useEffect(() => {
     (async () => {
@@ -18,32 +19,14 @@ export default function HomePage() {
       await loadAuth();
       await loadChats();
       await loadUsage();
-    })();
-  }, []);
+    })().catch(console.error);
+  }, [loadAuth, ensureGuest, loadChats, loadUsage]);
 
   return (
-    <div className="chat-atmosphere relative flex h-[100dvh] w-full overflow-hidden">
-      <Strands
-        colors={["#0d9488", "#14b8a6", "#5eead4"]}
-        count={4}
-        speed={0.4}
-        amplitude={1}
-        waviness={1}
-        thickness={0.6}
-        glow={2.2}
-        taper={2.4}
-        spread={1.1}
-        intensity={0.35}
-        saturation={1.1}
-        opacity={0.5}
-        scale={1.6}
-      />
-      <div className="relative z-10 flex h-full w-full">
-        <CommandPalette />
-        <NetworkStatus />
-        <Sidebar />
-        <ChatArea />
-      </div>
+    <div className="workspace-frame fixed inset-0 flex h-[100dvh] w-full overflow-hidden">
+      <NetworkStatus />
+      <Sidebar />
+      <ChatArea />
     </div>
   );
 }

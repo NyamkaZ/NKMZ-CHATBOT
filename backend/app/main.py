@@ -1,9 +1,11 @@
 from contextlib import asynccontextmanager
+import logging
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.encoders import jsonable_encoder
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
@@ -20,15 +22,28 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
+class RedactQueryTokens(logging.Filter):
+    def filter(self, record):
+        if isinstance(record.args, tuple) and len(record.args) == 5:
+            args = list(record.args)
+            args[2] = str(args[2]).split("?", 1)[0]
+            record.args = tuple(args)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(RedactQueryTokens())
+
+
 def _cors_headers(request: Request) -> dict:
-    origin = request.headers.get("origin") or "http://localhost:3000"
-    # Reflect request origin in dev so browser never blocks
+    origin = request.headers.get("origin")
+    if origin not in settings.cors_origins_list:
+        return {}
     return {
         "Access-Control-Allow-Origin": origin,
         "Access-Control-Allow-Credentials": "true",
         "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
         "Access-Control-Allow-Headers": "Authorization,Content-Type,X-Guest-Id,Accept,Origin",
-        "Access-Control-Expose-Headers": "*",
+        "Vary": "Origin",
     }
 
 
@@ -39,9 +54,14 @@ async def lifespan(app: FastAPI):
         redis = await get_redis()
         await redis.ping()
         logger.info("redis_connected")
+        if not settings.USE_GENERATION_WORKER:
+            from app.services.generation import recover_interrupted_generations
+            await recover_interrupted_generations()
     except Exception as e:
         logger.error("redis_connection_failed", error=str(e))
     yield
+    from app.services.llm.ollama import ollama_service
+    await ollama_service.aclose()
     await close_redis()
     logger.info("shutdown_complete")
 
@@ -55,17 +75,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Broad CORS for local frontend (must be added before routes)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:3001",
-        "http://127.0.0.1:3001",
-        *settings.cors_origins_list,
-    ],
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -78,7 +90,7 @@ app.add_middleware(
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors()},
+        content={"detail": jsonable_encoder(exc.errors(), custom_encoder={ValueError: str})},
         headers=_cors_headers(request),
     )
 
@@ -88,7 +100,7 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
-        headers=_cors_headers(request),
+        headers={**_cors_headers(request), **(exc.headers or {})},
     )
 
 
@@ -97,18 +109,12 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("unhandled_exception", path=request.url.path, error=str(exc))
     return JSONResponse(
         status_code=500,
-        content={"detail": f"Internal server error: {exc}"},
+        content={"detail": "Internal server error"},
         headers=_cors_headers(request),
     )
 
 
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
-
-
-@app.options("/{full_path:path}")
-async def options_handler(full_path: str, request: Request):
-    """Ensure preflight always succeeds."""
-    return JSONResponse(content={"ok": True}, headers=_cors_headers(request))
 
 
 @app.get("/health")

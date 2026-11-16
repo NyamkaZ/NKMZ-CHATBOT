@@ -37,13 +37,24 @@ class User(Base):
     guest_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
 
     subscription_tier: Mapped[SubscriptionTier] = mapped_column(
-        SAEnum(SubscriptionTier), default=SubscriptionTier.FREE, nullable=False
+        SAEnum(SubscriptionTier, values_callable=lambda enum: [item.value for item in enum]),
+        default=SubscriptionTier.FREE, nullable=False
     )
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     subscription_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Bumped whenever the password changes; access tokens carry the value they
+    # were issued with, so older sessions stop working.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Bumped whenever the password changes; access tokens carry the value they
+    # were issued with, so older sessions stop working.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
 
     # Usage tracking (also mirrored in Redis for speed)
     daily_message_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -59,6 +70,14 @@ class User(Base):
     )
 
     chats: Mapped[list["Chat"]] = relationship("Chat", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def email_verified(self) -> bool:
+        return self.email_verified_at is not None
+
+    @property
+    def email_verified(self) -> bool:
+        return self.email_verified_at is not None
 
     def __repr__(self) -> str:
         return f"<User {self.email or self.guest_id}>"

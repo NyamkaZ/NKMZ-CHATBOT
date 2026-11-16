@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import asyncio
 from typing import Annotated, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, or_
 
 from app.api.v1.deps import get_current_user
 from app.core.config import settings
@@ -42,6 +44,7 @@ async def list_plans():
             for k, v in PLAN_META.items()
         ],
         "stripe_enabled": stripe_configured(),
+        "demo_enabled": settings.ENVIRONMENT in ("development", "dev", "local") and not stripe_configured(),
     }
 
 
@@ -88,7 +91,7 @@ async def create_checkout(
     stripe = get_stripe()
     customer_id = user.stripe_customer_id
     if not customer_id:
-        customer = stripe.Customer.create(
+        customer = await asyncio.to_thread(stripe.Customer.create,
             email=user.email,
             metadata={"user_id": str(user.id)},
         )
@@ -96,13 +99,14 @@ async def create_checkout(
         user.stripe_customer_id = customer_id
         await db.commit()
 
-    session = stripe.checkout.Session.create(
+    session = await asyncio.to_thread(stripe.checkout.Session.create,
         mode="subscription",
         customer=customer_id,
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=f"{settings.FRONTEND_URL}/pricing?success=1",
         cancel_url=f"{settings.FRONTEND_URL}/pricing?canceled=1",
         metadata={"user_id": str(user.id), "plan": body.plan},
+        subscription_data={"metadata": {"user_id": str(user.id), "plan": body.plan}},
     )
     return {"checkout_url": session.url, "session_id": session.id}
 
@@ -116,7 +120,7 @@ async def billing_portal(
     if not stripe_configured():
         raise HTTPException(503, "Stripe not configured")
     stripe = get_stripe()
-    session = stripe.billing_portal.Session.create(
+    session = await asyncio.to_thread(stripe.billing_portal.Session.create,
         customer=user.stripe_customer_id,
         return_url=f"{settings.FRONTEND_URL}/pricing",
     )
@@ -132,6 +136,8 @@ async def demo_upgrade(
     """Simulate a successful payment when Stripe keys are absent (development only)."""
     if settings.ENVIRONMENT not in ("development", "dev", "local"):
         raise HTTPException(403, "Demo upgrade disabled in production")
+    if stripe_configured():
+        raise HTTPException(403, "Demo upgrade disabled when Stripe is configured")
     if user.is_guest:
         raise HTTPException(401, "Login required")
     tier = SubscriptionTier.PRO if body.plan == "pro" else SubscriptionTier.PREMIUM
@@ -162,52 +168,46 @@ async def stripe_webhook(
     etype = event["type"]
     data = event["data"]["object"]
 
-    if etype == "checkout.session.completed":
-        user_id = (data.get("metadata") or {}).get("user_id")
-        plan = (data.get("metadata") or {}).get("plan", "pro")
-        if user_id:
-            from uuid import UUID
-            from sqlalchemy import select
-
-            result = await db.execute(select(User).where(User.id == UUID(user_id)))
-            user = result.scalar_one_or_none()
-            if user:
-                tier = (
-                    SubscriptionTier.PREMIUM
-                    if plan == "premium"
-                    else SubscriptionTier.PRO
-                )
-                sub_id = data.get("subscription")
-                cust = data.get("customer")
-                await apply_tier(
-                    db,
-                    user,
-                    tier,
-                    stripe_customer_id=cust,
-                    stripe_subscription_id=sub_id,
-                    expires_at=datetime.now(timezone.utc) + timedelta(days=32),
-                )
-
-    if etype in ("customer.subscription.deleted", "customer.subscription.updated"):
+    sub_id = None
+    if etype in ("checkout.session.completed", "checkout.session.async_payment_succeeded"):
+        if data.get("payment_status") in ("paid", "no_payment_required"):
+            sub_id = data.get("subscription")
+    elif etype in ("customer.subscription.deleted", "customer.subscription.updated", "customer.subscription.created"):
         sub_id = data.get("id")
-        status = data.get("status")
-        from sqlalchemy import select
-
-        result = await db.execute(
-            select(User).where(User.stripe_subscription_id == sub_id)
+    elif etype == "invoice.paid":
+        sub_id = data.get("subscription") or (
+            ((data.get("parent") or {}).get("subscription_details") or {}).get("subscription")
         )
+
+    if sub_id:
+        # Fetch current state so retries and out-of-order webhooks cannot undo a
+        # newer renewal, plan change, or cancellation.
+        subscription = await asyncio.to_thread(stripe.Subscription.retrieve, sub_id)
+        customer_id = subscription.get("customer")
+        clauses = [User.stripe_subscription_id == sub_id]
+        if customer_id:
+            clauses.append(User.stripe_customer_id == customer_id)
+        result = await db.execute(select(User).where(or_(*clauses)))
         user = result.scalar_one_or_none()
         if user:
-            if status in ("active", "trialing"):
-                # keep tier
-                pass
-            else:
-                await apply_tier(
-                    db,
-                    user,
-                    SubscriptionTier.FREE,
-                    stripe_subscription_id=None,
-                    expires_at=None,
+            tier = SubscriptionTier.FREE
+            expires = None
+            if subscription.get("status") in ("active", "trialing"):
+                items = (subscription.get("items") or {}).get("data") or []
+                prices = {(item.get("price") or {}).get("id") for item in items}
+                if settings.STRIPE_PREMIUM_PRICE_ID and settings.STRIPE_PREMIUM_PRICE_ID in prices:
+                    tier = SubscriptionTier.PREMIUM
+                elif settings.STRIPE_PRO_PRICE_ID and settings.STRIPE_PRO_PRICE_ID in prices:
+                    tier = SubscriptionTier.PRO
+                period_end = subscription.get("current_period_end") or max(
+                    (item.get("current_period_end") or 0 for item in items), default=0
                 )
+                if period_end:
+                    expires = datetime.fromtimestamp(period_end, tz=timezone.utc)
+            await apply_tier(
+                db, user, tier, stripe_customer_id=customer_id,
+                stripe_subscription_id=sub_id if tier != SubscriptionTier.FREE else None,
+                expires_at=expires,
+            )
 
     return {"received": True}

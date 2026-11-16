@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Text, DateTime, ForeignKey, Integer, Boolean, Enum as SAEnum
+from sqlalchemy import String, Text, DateTime, ForeignKey, Integer, Boolean, Enum as SAEnum, case
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 import enum
@@ -35,6 +35,7 @@ class Chat(Base):
     guest_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     title: Mapped[str] = mapped_column(String(255), default="New Chat")
     is_title_generated: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     channel: Mapped[str] = mapped_column(String(32), default="web")  # web, telegram, discord, messenger
 
     created_at: Mapped[datetime] = mapped_column(
@@ -48,7 +49,9 @@ class Chat(Base):
 
     user: Mapped["User | None"] = relationship("User", back_populates="chats")
     messages: Mapped[list["Message"]] = relationship(
-        "Message", back_populates="chat", cascade="all, delete-orphan", order_by="Message.created_at"
+        "Message", back_populates="chat", cascade="all, delete-orphan",
+        # A question and its answer can share a timestamp; the question comes first.
+        order_by=lambda: (Message.created_at, case((Message.role == MessageRole.USER, 0), else_=1)),
     )
 
 
@@ -69,7 +72,9 @@ class Message(Base):
     # For streaming / background generation tracking
     generation_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)  # tokens generated
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)  # tokens read (history + references)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)  # model time for this answer
     model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(

@@ -1,11 +1,12 @@
 """
 Usage (inside backend container or with PYTHONPATH):
-  python scripts/create_admin.py --email admin@example.com --password admin123
+  python scripts/create_admin.py --email admin@example.com
 """
 import argparse
 import asyncio
 import sys
 import os
+import getpass
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
@@ -37,7 +38,7 @@ async def main(email: str, password: str, name: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--email", default="admin@example.com")
-    parser.add_argument("--password", default="admin123")
+    parser.add_argument("--password", help="Omit to enter the password securely")
     parser.add_argument("--name", default="Admin")
     args = parser.parse_args()
-    asyncio.run(main(args.email, args.password, args.name))
+    asyncio.run(main(args.email, args.password or getpass.getpass("Admin password: "), args.name))

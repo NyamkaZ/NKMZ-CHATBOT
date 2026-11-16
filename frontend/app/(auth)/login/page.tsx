@@ -8,21 +8,21 @@ import { friendlyError } from "@/lib/errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import Link from "next/link";
-import type { Locale } from "@/lib/i18n";
+import { AuthFrame } from "@/components/auth/AuthFrame";
+import { ArrowRight, ArrowUpRight, Eye, EyeOff, Loader2 } from "lucide-react";
 
 export default function LoginPage() {
   const router = useRouter();
-  const { t, locale, setLocale, loadAuth, user, authLoaded } = useChatStore();
+  const { t, locale, loadAuth, user, authLoaded } = useChatStore();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
-    const saved = localStorage.getItem("locale") as Locale | null;
-    if (saved === "en" || saved === "mn") setLocale(saved);
     loadAuth();
-  }, []);
+  }, [loadAuth]);
 
   useEffect(() => {
     if (authLoaded && user && !user.is_guest) {
@@ -58,79 +58,87 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="chat-atmosphere flex min-h-screen items-center justify-center px-4">
-      <div className="w-full max-w-md space-y-6 rounded-3xl border border-border/70 bg-background/70 p-8 shadow-glow backdrop-blur-xl">
-        <div className="flex justify-between items-start gap-2">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-teal-700 text-primary-foreground font-display text-xs font-bold">
-              NK
-            </div>
-            <span className="font-display text-sm font-semibold">NKMZ Chat</span>
-          </div>
-          <div className="flex gap-1 rounded-xl bg-muted/50 p-0.5">
-            <Button
-              variant={locale === "mn" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-8 text-xs rounded-lg"
-              onClick={() => setLocale("mn")}
-            >
-              Монгол
-            </Button>
-            <Button
-              variant={locale === "en" ? "secondary" : "ghost"}
-              size="sm"
-              className="h-8 text-xs rounded-lg"
-              onClick={() => setLocale("en")}
-            >
-              English
-            </Button>
-          </div>
-        </div>
+    <AuthFrame decryptHeading>
         <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">
+          <p className="mb-3 text-[10px] font-medium uppercase tracking-[0.2em] text-neutral-500">{locale === "mn" ? "ТАНЫ ОРОН ЗАЙ" : "YOUR PERSONAL SPACE"}</p>
+          <h1 className="font-display text-[28px] font-medium tracking-[-0.04em]">
             {t("welcomeBack")}
           </h1>
-          <p className="text-sm text-muted-foreground mt-1.5">
+          <p className="mt-2 text-[13px] leading-6 text-neutral-500">
             {t("signInContinue")}
           </p>
         </div>
-        <form onSubmit={onSubmit} className="space-y-4">
+        <form onSubmit={onSubmit} className="space-y-5">
           <div>
-            <label className="text-sm font-medium">{t("email")}</label>
+            <label htmlFor="login-email" className="text-xs font-medium text-neutral-300">{t("email")}</label>
             <Input
+              id="login-email"
+              name="email"
+              autoComplete="email"
               type="email"
+              placeholder="you@example.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
-              className="mt-1.5 h-11 rounded-xl"
+              disabled={loading}
+              className="mt-2 h-12 rounded-xl text-[13px] placeholder:text-neutral-600 focus-visible:ring-1"
             />
           </div>
           <div>
-            <label className="text-sm font-medium">{t("password")}</label>
+            <div className="flex items-baseline justify-between gap-3">
+              <label htmlFor="login-password" className="text-xs font-medium text-neutral-300">{t("password")}</label>
+              <Link href="/forgot-password" className="text-xs text-neutral-500 underline-offset-4 hover:text-neutral-200 hover:underline">
+                {t("forgotLink")}
+              </Link>
+            </div>
+            <div className="relative mt-2">
             <Input
-              type="password"
+              id="login-password"
+              name="password"
+              autoComplete="current-password"
+              type={showPassword ? "text" : "password"}
+              placeholder="••••••••"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              className="mt-1.5 h-11 rounded-xl"
+              disabled={loading}
+              className="h-12 rounded-xl pr-11 text-[13px] placeholder:text-neutral-600 focus-visible:ring-1"
             />
+            <button type="button" onClick={() => setShowPassword(!showPassword)}
+              aria-label={locale === "mn" ? (showPassword ? "Нууц үгийг нуух" : "Нууц үгийг харах") : (showPassword ? "Hide password" : "Show password")}
+              className="absolute inset-y-0 right-3 flex items-center text-neutral-500 transition-colors hover:text-neutral-200">
+              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+            </div>
           </div>
-          {error && <p className="text-sm text-destructive">{error}</p>}
+          {error && <p role="alert" className="rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-xs text-red-300">{error}</p>}
           <Button
             type="submit"
-            className="w-full h-11 rounded-xl"
+            className="relative h-12 w-full rounded-xl bg-neutral-100 text-[13px] font-semibold text-neutral-950 hover:bg-white"
             disabled={loading}
           >
             {loading ? t("signingIn") : t("signIn")}
+            {loading ? <Loader2 className="absolute right-4 h-4 w-4 animate-spin" /> : <ArrowRight className="absolute right-4 h-4 w-4" />}
           </Button>
+          <Link
+            href="/about"
+            prefetch={false}
+            className="flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-white/[0.09] text-xs text-neutral-400 transition-colors hover:border-white/20 hover:bg-white/[0.03] hover:text-neutral-100 focus-visible:outline focus-visible:outline-offset-4 focus-visible:outline-neutral-400"
+          >
+            {locale === "mn" ? "Бидний тухай" : "About NKMZ"}
+            <ArrowUpRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
         </form>
-        <p className="text-center text-sm text-muted-foreground">
+        <p className="border-t border-white/[0.07] pt-6 text-center text-xs text-neutral-500">
           {t("noAccount")}{" "}
-          <Link href="/register" className="text-primary font-medium hover:underline">
+          <Link href="/register" className="ml-1 font-medium text-neutral-200 underline-offset-4 hover:underline">
             {t("register")}
           </Link>
         </p>
-      </div>
-    </div>
+        <p className="text-center text-[10px] tracking-wide text-neutral-600">
+          Created by <span className="text-neutral-400">Nyamtsogt</span>
+        </p>
+    </AuthFrame>
   );
 }
+

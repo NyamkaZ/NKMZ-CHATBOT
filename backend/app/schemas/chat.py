@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional, List
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models.chat import MessageRole, MessageStatus
 
 
@@ -33,12 +33,20 @@ class ChatBase(BaseModel):
 
 
 class ChatCreate(BaseModel):
-    title: Optional[str] = "New Chat"
-    channel: str = "web"
+    title: Optional[str] = Field("New Chat", max_length=255)
+    channel: str = Field("web", max_length=32)
 
 
 class ChatUpdate(BaseModel):
-    title: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    is_pinned: Optional[bool] = None
+
+    @field_validator("title")
+    @classmethod
+    def title_not_blank(cls, title: Optional[str]) -> Optional[str]:
+        if title is not None and not title.strip():
+            raise ValueError("Title cannot be blank")
+        return title.strip() if title is not None else None
 
 
 class ChatOut(ChatBase):
@@ -48,6 +56,7 @@ class ChatOut(ChatBase):
     user_id: Optional[UUID] = None
     guest_id: Optional[str] = None
     is_title_generated: bool
+    is_pinned: bool = False
     channel: str
     created_at: datetime
     updated_at: datetime
@@ -60,6 +69,7 @@ class ChatListItem(BaseModel):
     id: UUID
     title: str
     is_title_generated: bool
+    is_pinned: bool = False
     updated_at: datetime
     last_message_preview: Optional[str] = None
 
@@ -71,12 +81,23 @@ class SendMessageRequest(BaseModel):
         None, max_length=32, description="Persona id: default, coder, tutor, creative, analyst"
     )
 
+    @field_validator("content")
+    @classmethod
+    def content_not_blank(cls, content: str) -> str:
+        if not content.strip():
+            raise ValueError("Message cannot be blank")
+        return content
+
 
 class SendMessageResponse(BaseModel):
     chat: ChatOut
     user_message: MessageOut
     assistant_message: MessageOut  # initially with status=thinking
     usage: Optional[dict] = None
+
+
+class RegenerateMessageRequest(BaseModel):
+    persona: Optional[str] = Field(None, max_length=32)
 
 
 class StreamEvent(BaseModel):

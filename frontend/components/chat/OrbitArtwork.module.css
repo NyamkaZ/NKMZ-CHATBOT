@@ -1,0 +1,30 @@
+.scene {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  background: radial-gradient(ellipse at 60% 45%, #291014 0%, #0c090d 52%, #050509 88%);
+}
+
+.disc {
+  position: absolute;
+  left: 57%;
+  top: 47%;
+  width: max(130%, 86vh);
+  max-width: none;
+  height: auto;
+  filter: hue-rotate(-36deg) saturate(1.3);
+  transform: translate(-50%, -50%) scaleX(-1);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .disc {
+    animation: orbit-drift 16s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes orbit-drift {
+  from { transform: translate(-51%, -49%) rotate(-2deg) scale(-1, 1); }
+  to { transform: translate(-48%, -52%) rotate(2deg) scale(-1.05, 1.05); }
+}

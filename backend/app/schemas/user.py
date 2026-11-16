@@ -29,6 +29,7 @@ class UserOut(UserBase):
 
     id: UUID
     is_guest: bool
+    email_verified: bool = False
     subscription_tier: SubscriptionTier = SubscriptionTier.FREE
     daily_message_count: int
     last_message_date: Optional[datetime] = None

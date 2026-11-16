@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { useChatStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,7 @@ export function KnowledgeBase({ open, onClose }: Props) {
   const [uploading, setUploading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
       const list = (await api.listDocuments()) as DocItem[];
@@ -38,11 +38,11 @@ export function KnowledgeBase({ open, onClose }: Props) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
 
   useEffect(() => {
     if (open) load();
-  }, [open]);
+  }, [open, load]);
 
   const onUpload = async (file: File) => {
     setUploading(true);

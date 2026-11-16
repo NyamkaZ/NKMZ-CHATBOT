@@ -17,10 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.redis import get_redis
-from app.core.security import decode_access_token
-from app.models.chat import Message
+from app.api.v1.deps import user_from_token
+from app.models.chat import Message, Chat
 from app.models.user import User
 from app.services.generation import get_generation_state, _gen_key
+from app.services.ownership import owns_chat
 import structlog
 
 logger = structlog.get_logger()
@@ -33,19 +34,11 @@ async def _resolve_user(
     guest_id: Optional[str],
 ) -> Optional[User]:
     if token:
-        payload = decode_access_token(token)
-        if payload and payload.get("sub"):
-            try:
-                result = await db.execute(
-                    select(User).where(User.id == UUID(payload["sub"]))
-                )
-                user = result.scalar_one_or_none()
-                if user and user.is_active:
-                    return user
-            except Exception:
-                pass
+        return await user_from_token(db, token)
     if guest_id:
-        result = await db.execute(select(User).where(User.guest_id == guest_id))
+        result = await db.execute(select(User).where(
+            User.guest_id == guest_id, User.is_guest.is_(True), User.is_active.is_(True)
+        ))
         return result.scalar_one_or_none()
     return None
 
@@ -58,20 +51,22 @@ async def stream_generation(
     token: Optional[str] = Query(None),
     guest_id: Optional[str] = Query(None),
 ):
+    user = await _resolve_user(db, token, guest_id)
+    if not user:
+        raise HTTPException(401, "Authentication required")
+    result = await db.execute(
+        select(Message, Chat).join(Chat, Message.chat_id == Chat.id)
+        .where(Message.generation_id == generation_id)
+    )
+    row = result.one_or_none()
+    if not row or not owns_chat(user, row[1]):
+        raise HTTPException(404, "Generation not found")
+    msg, chat = row
     redis = await get_redis()
     key = _gen_key(generation_id)
 
-    # Optional auth via query (EventSource-friendly)
-    await _resolve_user(db, token, guest_id)
-
     state = await get_generation_state(generation_id)
     if not state:
-        result = await db.execute(
-            select(Message).where(Message.generation_id == generation_id)
-        )
-        msg = result.scalar_one_or_none()
-        if not msg:
-            raise HTTPException(404, "Generation not found")
         if msg.status.value in ("completed", "stopped", "failed"):
 
             async def finished():
@@ -83,22 +78,19 @@ async def stream_generation(
             return StreamingResponse(finished(), media_type="text/event-stream")
 
     async def event_generator():
-        # 1. Replay
-        current = state or (await get_generation_state(generation_id))
-        if current:
-            tokens = current.get("tokens") or []
-            if tokens:
-                yield f"event: catchup\ndata: {json.dumps({'content': ''.join(tokens), 'status': current.get('status')})}\n\n"
-            status = current.get("status")
-            if status in ("completed", "stopped", "failed"):
-                yield f"event: done\ndata: {json.dumps({'status': status, 'content': current.get('content', ''), 'error': current.get('error')})}\n\n"
-                return
-
-        # 2. Live Redis pub/sub
+        # Subscribe BEFORE reading the snapshot. Sequence numbers discard
+        # queued tokens already present in that snapshot.
         pubsub = redis.pubsub()
         channel = f"{key}:channel"
         await pubsub.subscribe(channel)
         try:
+            current = await get_generation_state(generation_id)
+            replayed = len((current or {}).get("tokens") or [])
+            if current:
+                yield f"event: catchup\ndata: {json.dumps({'content': current.get('content', ''), 'status': current.get('status')})}\n\n"
+                if current.get("status") in ("completed", "stopped", "failed"):
+                    yield f"event: done\ndata: {json.dumps({'status': current.get('status'), 'content': current.get('content', ''), 'error': current.get('error')})}\n\n"
+                    return
             idle_ticks = 0
             while True:
                 if await request.is_disconnected():
@@ -115,6 +107,8 @@ async def stream_generation(
                         payload = json.loads(raw)
                         event = payload.get("event", "message")
                         data = payload.get("data", {})
+                        if event == "token" and data.get("sequence", 0) <= replayed:
+                            continue
                         yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
                         if event in ("done", "stopped", "failed", "error"):
                             break
@@ -134,11 +128,16 @@ async def stream_generation(
                         ):
                             yield f"event: done\ndata: {json.dumps({'status': st.get('status'), 'content': st.get('content', ''), 'error': st.get('error')})}\n\n"
                             break
+                        if await redis.get(f"chat:{chat.id}:active_gen") != generation_id:
+                            await db.refresh(msg)
+                            terminal = msg.status.value if msg.status.value in ("completed", "stopped", "failed") else "failed"
+                            yield f"event: done\ndata: {json.dumps({'status': terminal, 'content': (st or {}).get('content') or msg.content, 'error': msg.error_message or ('Generation interrupted. Please retry.' if terminal == 'failed' else None)})}\n\n"
+                            break
                     await asyncio.sleep(0.05)
         finally:
             try:
                 await pubsub.unsubscribe(channel)
-                await pubsub.close()
+                await pubsub.aclose()
             except Exception:
                 pass
 

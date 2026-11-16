@@ -1,3 +1,5 @@
+import { retryTime } from "./countdown";
+
 const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
 
 function getHeaders(json = true): HeadersInit {
@@ -12,20 +14,38 @@ function getHeaders(json = true): HeadersInit {
   return headers;
 }
 
-async function handleResponse<T>(res: Response): Promise<T> {
+/**
+ * Turn an API error body into one readable sentence. Validation failures
+ * arrive as a list of {loc, msg} objects and must never be shown as raw JSON.
+ */
+export function describeError(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (typeof item === "string" ? item : typeof item?.msg === "string" ? item.msg : ""))
+      .map((message) => message.replace(/^Value error,\s*/i, "").trim())
+      .filter(Boolean);
+    return Array.from(new Set(messages)).join(" ");
+  }
+  if (detail && typeof detail === "object") {
+    const { message, msg } = detail as { message?: unknown; msg?: unknown };
+    if (typeof message === "string") return message;
+    if (typeof msg === "string") return msg;
+  }
+  return "";
+}
+
+export async function handleResponse<T>(res: Response, preserveSession = false): Promise<T> {
   if (!res.ok) {
     let detail = res.statusText;
     try {
       const err = await res.json();
-      detail =
-        typeof err.detail === "string"
-          ? err.detail
-          : JSON.stringify(err.detail || err);
+      detail = describeError(err?.detail ?? err) || detail;
     } catch {
       /* ignore */
     }
     // Session expired / unauthorized
-    if (res.status === 401 && typeof window !== "undefined") {
+    if (res.status === 401 && !preserveSession && typeof window !== "undefined") {
       const hadToken = !!localStorage.getItem("access_token");
       if (hadToken) {
         localStorage.removeItem("access_token");
@@ -35,8 +55,11 @@ async function handleResponse<T>(res: Response): Promise<T> {
     }
     const error = new Error(detail || "Request failed") as Error & {
       status?: number;
+      retryAt?: number;
     };
     error.status = res.status;
+    // Limits (429) say when the next attempt can succeed.
+    error.retryAt = retryTime(res.headers.get("Retry-After"));
     throw error;
   }
   if (res.status === 204) return undefined as T;
@@ -44,6 +67,11 @@ async function handleResponse<T>(res: Response): Promise<T> {
 }
 
 export const api = {
+  async getModelInfo() {
+    const res = await fetch(`${API_URL}/health/ollama`, { cache: "no-store" });
+    return handleResponse<{ current_model?: string }>(res, true);
+  },
+
   async createGuest() {
     const res = await fetch(`${API_URL}/api/v1/auth/guest`, {
       method: "POST",
@@ -58,7 +86,7 @@ export const api = {
       headers: getHeaders(),
       body: JSON.stringify({ email, password }),
     });
-    return handleResponse<{ access_token: string }>(res);
+    return handleResponse<{ access_token: string }>(res, true);
   },
 
   async register(email: string, password: string, full_name?: string) {
@@ -67,7 +95,7 @@ export const api = {
       headers: getHeaders(),
       body: JSON.stringify({ email, password, full_name }),
     });
-    return handleResponse<{ access_token: string }>(res);
+    return handleResponse<{ access_token: string }>(res, true);
   },
 
   async me() {
@@ -75,6 +103,61 @@ export const api = {
       headers: getHeaders(),
     });
     return handleResponse(res);
+  },
+
+  async updateProfile(full_name: string) {
+    const res = await fetch(`${API_URL}/api/v1/auth/me`, {
+      method: "PATCH",
+      headers: getHeaders(),
+      body: JSON.stringify({ full_name }),
+    });
+    return handleResponse(res);
+  },
+
+  /** Changing the password signs out other devices; this one continues with the returned token. */
+  async changePassword(current_password: string, new_password: string) {
+    const res = await fetch(`${API_URL}/api/v1/auth/change-password`, {
+      method: "POST",
+      headers: getHeaders(),
+      body: JSON.stringify({ current_password, new_password }),
+    });
+    // A wrong current password is a 400, never a reason to drop the session.
+    return handleResponse<{ access_token: string }>(res, true);
+  },
+
+  async forgotPassword(email: string) {
+    const res = await fetch(`${API_URL}/api/v1/auth/forgot-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    return handleResponse<{ message: string }>(res, true);
+  },
+
+  async resetPassword(token: string, new_password: string) {
+    const res = await fetch(`${API_URL}/api/v1/auth/reset-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, new_password }),
+    });
+    return handleResponse<void>(res, true);
+  },
+
+  async verifyEmail(token: string) {
+    const res = await fetch(`${API_URL}/api/v1/auth/verify-email`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    return handleResponse<void>(res, true);
+  },
+
+  async resendVerification() {
+    const res = await fetch(`${API_URL}/api/v1/auth/resend-verification`, {
+      method: "POST",
+      headers: getHeaders(),
+    });
+    return handleResponse<{ sent: boolean }>(res);
   },
 
   async listChats(q?: string) {
@@ -114,6 +197,15 @@ export const api = {
       method: "PATCH",
       headers: getHeaders(),
       body: JSON.stringify({ title }),
+    });
+    return handleResponse(res);
+  },
+
+  async pinChat(chatId: string, is_pinned: boolean) {
+    const res = await fetch(`${API_URL}/api/v1/chats/${chatId}`, {
+      method: "PATCH",
+      headers: getHeaders(),
+      body: JSON.stringify({ is_pinned }),
     });
     return handleResponse(res);
   },
@@ -177,10 +269,10 @@ export const api = {
     return handleResponse(res);
   },
 
-  async regenerate(chatId: string, messageId: string) {
+  async regenerate(chatId: string, messageId: string, persona?: string) {
     const res = await fetch(
       `${API_URL}/api/v1/chats/${chatId}/messages/${messageId}/regenerate`,
-      { method: "POST", headers: getHeaders() }
+      { method: "POST", headers: getHeaders(), body: JSON.stringify({ persona }) }
     );
     return handleResponse(res);
   },
