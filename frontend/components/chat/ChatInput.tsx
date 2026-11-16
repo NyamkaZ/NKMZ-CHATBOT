@@ -8,6 +8,7 @@ import { friendlyError } from "@/lib/errors";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import { ArrowUp, Check, ChevronDown, Mic, MicOff, SlidersHorizontal, Square } from "lucide-react";
 import Link from "next/link";
+import { LiquidMetalButton } from "@/components/ui/liquid-metal-button";
 import ElectricBorder from "@/components/react-bits/ElectricBorder";
 import { composerDrafts, type ComposerDraft, type DraftKey } from "./composerDrafts";
 import { formatCountdown } from "@/lib/countdown";
@@ -262,15 +263,15 @@ function Composer() {
                   {listening ? <MicOff aria-hidden="true" size={18} /> : <Mic aria-hidden="true" size={18} />}
                 </button>
                 {isCurrentGenerating ? (
-                  <button key="stop" type="button" className={styles.send}
+                  <LiquidMetalButton key="stop" viewMode="icon" size={40}
                     onClick={() => currentChatId && stopGenerating(currentChatId)} title={t("stop")} aria-label={t("stop")}>
-                    <Square aria-hidden="true" size={14} fill="currentColor" />
-                  </button>
+                    <Square aria-hidden="true" size={13} fill="currentColor" />
+                  </LiquidMetalButton>
                 ) : (
-                  <button key="send" type="submit" className={styles.send}
+                  <LiquidMetalButton key="send" type="submit" viewMode="icon" size={40}
                     disabled={sendDisabled || !text.trim()} title={sendLabel} aria-label={sendLabel}>
-                    <ArrowUp aria-hidden="true" size={20} strokeWidth={2.25} />
-                  </button>
+                    <ArrowUp aria-hidden="true" size={19} strokeWidth={2.25} />
+                  </LiquidMetalButton>
                 )}
               </div>
             </div>

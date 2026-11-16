@@ -19,6 +19,9 @@
   z-index: -1;
   overflow: hidden;
   pointer-events: none;
+  /* The scene is monochrome: this removes the faint blue the shader adds near
+     the centre, and covers the image fallback as well. */
+  filter: grayscale(1);
 }
 .workspace-orbit::after {
   content: "";

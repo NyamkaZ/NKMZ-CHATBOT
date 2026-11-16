@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useChatStore } from "@/lib/store";
 import { friendlyError } from "@/lib/errors";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LiquidMetalButton } from "@/components/ui/liquid-metal-button";
 import Link from "next/link";
 import { AuthFrame } from "@/components/auth/AuthFrame";
 import { ArrowRight, Loader2 } from "lucide-react";
@@ -114,14 +114,10 @@ export default function RegisterPage() {
             />
           </div>
           {error && <p role="alert" className="rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-xs text-red-300">{error}</p>}
-          <Button
-            type="submit"
-            className="relative h-12 w-full rounded-xl bg-neutral-100 text-[13px] font-semibold text-neutral-950 hover:bg-white"
-            disabled={loading}
-          >
+          <LiquidMetalButton type="submit" fullWidth size={48} disabled={loading}>
             {loading ? t("creating") : t("createAccount")}
             {loading ? <Loader2 className="absolute right-4 h-4 w-4 animate-spin" /> : <ArrowRight className="absolute right-4 h-4 w-4" />}
-          </Button>
+          </LiquidMetalButton>
         </form>
         <p className="border-t border-white/[0.07] pt-6 text-center text-xs text-neutral-500">
           {t("haveAccount")}{" "}

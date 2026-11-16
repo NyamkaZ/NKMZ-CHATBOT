@@ -18,7 +18,15 @@ import { MessageBubble } from "./MessageBubble";
 import { useChatScroll } from "./useChatScroll";
 
 const EMPTY_MESSAGES: Message[] = [];
-const ORBIT_PARAMS: Partial<AccretionParams> = { center: [0.64, 0.43] };
+// Black and white only: silver disk bands and white streaks on black.
+const ORBIT_PARAMS: Partial<AccretionParams> = {
+  center: [0.64, 0.43],
+  diskColor: "#bdbdbd",
+  streakColor: "#ffffff",
+  glowColor: "#ffffff",
+  cloudColor: "#c8c8c8",
+  background: "#000000",
+};
 const ORBIT_FALLBACK = <OrbitArtwork />;
 
 export function ChatArea() {

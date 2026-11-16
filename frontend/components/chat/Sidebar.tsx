@@ -7,6 +7,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { LiquidMetalButton } from "@/components/ui/liquid-metal-button";
 import { KnowledgeBase } from "./KnowledgeBase";
 import { AccountMenu } from "./AccountMenu";
 import { ModelName } from "./ModelName";
@@ -90,13 +91,13 @@ export function Sidebar() {
             <PanelLeftClose aria-hidden className="h-4 w-4" />
           </Button>
         </div>
-        <Button className="h-11 w-full justify-between rounded-xl border border-white/15 bg-neutral-100 px-4 text-[13px] font-semibold text-neutral-950 hover:bg-white focus-visible:ring-neutral-300"
+        <LiquidMetalButton fullWidth size={44} contentClassName="justify-between px-5"
           onClick={() => {
             useChatStore.getState().createNewChat();
             if (!desktop) setSidebarOpen(false);
           }}>
           {t("newChat")}<Plus aria-hidden className="h-4 w-4" strokeWidth={1.8} />
-        </Button>
+        </LiquidMetalButton>
       </div>
 
       <div className="group relative mx-5 mt-2 shrink-0">

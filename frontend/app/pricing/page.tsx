@@ -6,6 +6,7 @@ import LaserFlow from "@/components/react-bits/LaserFlow";
 import { api } from "@/lib/api";
 import { useChatStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
+import { LiquidMetalButton } from "@/components/ui/liquid-metal-button";
 import { cn } from "@/lib/utils";
 import { Check, ArrowLeft, Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -162,13 +163,9 @@ export default function PricingPage() {
                     </li>
                   ))}
                 </ul>
-                <Button
-                  className="w-full rounded-xl"
-                  variant={highlighted ? "default" : "outline"}
-                  disabled={isCurrent || loading !== null || plan.id === "free" || (!stripeEnabled && !demoEnabled)}
-                  onClick={() => checkout(plan.id)}
-                >
-                  {loading === plan.id ? (
+                {(() => {
+                  const disabled = isCurrent || loading !== null || plan.id === "free" || (!stripeEnabled && !demoEnabled);
+                  const content = loading === plan.id ? (
                     <Loader2 className="h-4 w-4 animate-spin" />
                   ) : isCurrent ? (
                     t("currentPlan")
@@ -176,8 +173,18 @@ export default function PricingPage() {
                     t("freePlan")
                   ) : (
                     t("choosePlan")
-                  )}
-                </Button>
+                  );
+                  // The recommended plan gets the liquid metal button.
+                  return highlighted ? (
+                    <LiquidMetalButton fullWidth size={42} disabled={disabled} onClick={() => checkout(plan.id)}>
+                      {content}
+                    </LiquidMetalButton>
+                  ) : (
+                    <Button className="w-full rounded-xl" variant="outline" disabled={disabled} onClick={() => checkout(plan.id)}>
+                      {content}
+                    </Button>
+                  );
+                })()}
               </div>
             );
           })}

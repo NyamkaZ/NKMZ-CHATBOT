@@ -4,7 +4,7 @@
   overflow: hidden;
   pointer-events: none;
   user-select: none;
-  background: radial-gradient(ellipse at 60% 45%, #291014 0%, #0c090d 52%, #050509 88%);
+  background: radial-gradient(ellipse at 60% 45%, #1c1c1c 0%, #0b0b0b 52%, #050505 88%);
 }
 
 .disc {
