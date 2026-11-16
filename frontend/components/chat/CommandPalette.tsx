@@ -3,7 +3,7 @@
 import { memo, useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Command, CreditCard, Download, MessageSquarePlus, Search, Smartphone, X } from "lucide-react";
+import { CreditCard, Download, MessageSquarePlus, Search, Smartphone, X } from "lucide-react";
 import { useChatStore } from "@/lib/store";
 import { translate } from "@/lib/i18n";
 import { canInstall, promptInstall, subscribeInstall } from "@/lib/pwa";
@@ -71,13 +71,7 @@ export const CommandPalette = memo(function CommandPalette() {
 
   return (
     <Dialog.Root open={open} onOpenChange={changeOpen}>
-      <Dialog.Trigger asChild>
-        <button type="button" aria-label={label} aria-keyshortcuts="Control+K Meta+K" title={label}
-          className="flex h-9 w-9 shrink-0 items-center justify-center gap-2 rounded-lg text-neutral-300 hover:bg-white/10 focus-visible:outline focus-visible:outline-white/60 lg:w-auto lg:px-2">
-          <Command size={16} aria-hidden="true" />
-          <span className="hidden text-xs lg:inline">{label}</span>
-        </button>
-      </Dialog.Trigger>
+      {/* No visible trigger: the palette opens with Ctrl+K / Cmd+K. */}
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-[90] bg-black/60 backdrop-blur-sm" />
         <Dialog.Content aria-describedby={undefined}

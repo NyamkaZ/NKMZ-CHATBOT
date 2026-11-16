@@ -36,6 +36,8 @@ export interface Message {
   error_message?: string | null;
   created_at: string;
   updated_at: string;
+  /** Client only: when a reply that arrived complete started being typed out. */
+  reveal_at?: number;
 }
 
 export interface Chat {
@@ -422,7 +424,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const withoutDup = prev.filter(
           (m) => m.id !== userMsg.id && m.id !== asstMsg.id
         );
-        const msgs = [...withoutDup, userMsg, asstMsg];
+        // FAQ replies come back finished; type them out like a streamed answer.
+        const instant = asstMsg.status === "completed" && !!asstMsg.content;
+        const msgs = [...withoutDup, userMsg, instant ? { ...asstMsg, reveal_at: Date.now() } : asstMsg];
         const chats = s.chats.some((c) => c.id === chat.id)
           ? s.chats.map((c) =>
               c.id === chat.id

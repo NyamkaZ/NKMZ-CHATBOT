@@ -144,3 +144,51 @@ test("the install prompt is offered once and only while the browser allows it", 
     global.window = previousWindow;
   }
 });
+
+test("an answer that arrives complete is typed out from its first character", async () => {
+  const { revealDuration, revealedCount } = require("../lib/typewriter.ts");
+  assert.equal(revealDuration(0), 0);
+  assert.equal(revealDuration(5), 450, "short answers still animate briefly");
+  assert.equal(revealDuration(100), 1600);
+  assert.equal(revealDuration(10_000), 4000, "long answers never take more than four seconds");
+  assert.equal(revealedCount(100, 0), 0);
+  assert.equal(revealedCount(100, -50), 0, "a clock that runs backwards shows nothing yet");
+  assert.equal(revealedCount(100, 800), 50);
+  assert.equal(revealedCount(100, 1600), 100);
+  assert.equal(revealedCount(100, 99_999), 100);
+  assert.equal(revealedCount(0, 10), 0);
+  let previous = 0;
+  for (let elapsed = 0; elapsed <= 1600; elapsed += 16) {
+    const count = revealedCount(100, elapsed);
+    assert.ok(count >= previous && count <= 100, "the text only ever grows");
+    previous = count;
+  }
+
+  // The store marks only replies that came back already finished.
+  const { api } = require("../lib/api.ts");
+  const { useChatStore: store } = require("../lib/store.ts");
+  const original = api.sendMessage;
+  const reply = (status, content) => ({
+    chat: { id: "faq-" + status, title: "T", updated_at: "2026-01-01T00:00:00Z" },
+    user_message: { id: "u-" + status, role: "user", content: "q", status: "completed" },
+    assistant_message: { id: "a-" + status, role: "assistant", content, status, generation_id: null },
+  });
+  try {
+    store.getState().resetSession();
+    store.setState({ user: { id: "me", role: "user", is_guest: false } });
+    const before = Date.now();
+    api.sendMessage = async () => reply("completed", "Ажлын цаг 09:00–18:00.");
+    await store.getState().sendMessage("hours");
+    const finished = store.getState().messagesByChat["faq-completed"].at(-1);
+    assert.ok(finished.reveal_at >= before && finished.reveal_at <= Date.now());
+    assert.equal(finished.content, "Ажлын цаг 09:00–18:00.", "the full text is kept; only its display is gradual");
+
+    store.getState().createNewChat();
+    api.sendMessage = async () => reply("failed", "");
+    await store.getState().sendMessage("broken");
+    assert.equal(store.getState().messagesByChat["faq-failed"].at(-1).reveal_at, undefined);
+  } finally {
+    api.sendMessage = original;
+    store.getState().resetSession();
+  }
+});
