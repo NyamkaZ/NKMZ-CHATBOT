@@ -16,6 +16,8 @@ from app.core.config import settings
 
 logger = structlog.get_logger()
 
+KEYWORD_SCAN_LIMIT = 2000  # chunks read by the keyword fallback
+
 _chroma_client = None
 _collection = None
 
@@ -114,7 +116,7 @@ def _keyword_search(query: str, top_k: int) -> List[Dict[str, Any]]:
         _, collection = _get_chroma()
         if collection.count() == 0:
             return []
-        raw = collection.get(include=["documents", "metadatas"])
+        raw = collection.get(include=["documents", "metadatas"], limit=KEYWORD_SCAN_LIMIT)
         docs = raw.get("documents") or []
         metas = raw.get("metadatas") or []
         scored = []

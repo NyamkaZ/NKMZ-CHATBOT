@@ -109,6 +109,8 @@ async def get_usage(user: User) -> dict:
             "remaining": 999999,
             "resets_at": None,
             "subscription_tier": tier.value,
+            "is_guest": False,
+            "is_guest": False,
         }
     redis = await get_redis()
     cached = await redis.get(_today_key(str(user.id)))
@@ -124,4 +126,5 @@ async def get_usage(user: User) -> dict:
         "remaining": max(0, limit - used),
         "resets_at": tomorrow.isoformat(),
         "subscription_tier": tier.value,
+        "is_guest": bool(user.is_guest),
     }

@@ -13,6 +13,7 @@ async def get_redis() -> aioredis.Redis:
             encoding="utf-8",
             decode_responses=True,
             max_connections=50,
+            health_check_interval=30,
         )
     return _redis
 
