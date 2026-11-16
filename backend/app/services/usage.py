@@ -110,7 +110,6 @@ async def get_usage(user: User) -> dict:
             "resets_at": None,
             "subscription_tier": tier.value,
             "is_guest": False,
-            "is_guest": False,
         }
     redis = await get_redis()
     cached = await redis.get(_today_key(str(user.id)))

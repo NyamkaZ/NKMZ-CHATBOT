@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { friendlyError } from "@/lib/errors";
 import { translate, type Locale } from "@/lib/i18n";
 import { CodeBlock } from "./CodeBlock";
+import { useTypewriter } from "./useTypewriter";
 
 interface Props {
   message: Message;
@@ -54,14 +55,18 @@ export const MessageBubble = memo(function MessageBubble({ message, isLastAssist
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<ReturnType<typeof setTimeout>>();
   useEffect(() => () => clearTimeout(copyTimer.current), []);
-  const { regenerate, currentChatId, t, locale, isGenerating } = useChatStore(useShallow(s => ({
+  const { regenerate, currentChatId, t, locale, streaming } = useChatStore(useShallow(s => ({
     regenerate: s.regenerate,
     currentChatId: s.currentChatId,
     t: s.t,
     locale: s.locale,
-    isGenerating: !!s.currentChatId && s.generating[s.currentChatId]?.messageId === message.id &&
+    streaming: !!s.currentChatId && s.generating[s.currentChatId]?.messageId === message.id &&
       ["thinking", "streaming"].includes(s.generating[s.currentChatId].status),
   })));
+  // Replies that arrive complete (FAQ) are typed out; streamed ones already grow on their own.
+  const typed = useTypewriter(message.content, message.role === "assistant" ? message.reveal_at : undefined);
+  const isGenerating = streaming || typed.typing;
+  const content = typed.text;
   const isUser = message.role === "user";
 
   const handleCopy = async () => {
@@ -101,7 +106,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isLastAssist
         {!isUser && <ThoughtLine
           key={message.generation_id || message.id}
           working={isGenerating || ["pending", "thinking", "streaming"].includes(message.status)}
-          label={message.content ? (locale === "mn" ? "Хариулт бичиж байна…" : "Writing a reply…") : t("thinking")}
+          label={content ? (locale === "mn" ? "Хариулт бичиж байна…" : "Writing a reply…") : t("thinking")}
           doneLabel={message.status === "failed" ? (locale === "mn" ? "Алдаа гарлаа" : "Response failed") : message.status === "stopped" ? (locale === "mn" ? "Зогсоосон" : "Stopped") : (locale === "mn" ? "Хариулт бэлэн" : "Response finished")}
           steps={message.content ? [locale === "mn" ? "Хүсэлт хүлээн авсан" : "Request received", locale === "mn" ? "Хариулт бичих" : "Writing the response"] : [locale === "mn" ? "Хариулт хүлээж байна" : "Waiting for a response"]}
         />}
@@ -138,9 +143,9 @@ export const MessageBubble = memo(function MessageBubble({ message, isLastAssist
           ) : (
             <>
               <ReactMarkdown remarkPlugins={REMARK} rehypePlugins={REHYPE} components={COMPONENTS[locale]}>
-                {message.content || (isGenerating ? " " : "")}
+                {content || (isGenerating ? " " : "")}
               </ReactMarkdown>
-              {isGenerating && message.content ? (
+              {isGenerating && content ? (
                 <span aria-hidden="true" className="inline-block w-1.5 h-4 ml-0.5 bg-primary/80 animate-pulse align-middle rounded-sm" />
               ) : null}
             </>
