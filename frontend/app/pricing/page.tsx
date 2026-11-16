@@ -22,6 +22,10 @@ type Plan = {
 export default function PricingPage() {
   const { loadAuth, user, t } = useChatStore();
   const proCardRef = useRef<HTMLDivElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLDivElement>(null);
+  // Where the title block ends, so the beam can be dimmed behind the text.
+  const [headingEnd, setHeadingEnd] = useState(260);
   const [plans, setPlans] = useState<Plan[]>([]);
   const [stripeEnabled, setStripeEnabled] = useState(false);
   const [demoEnabled, setDemoEnabled] = useState(false);
@@ -37,6 +41,21 @@ export default function PricingPage() {
     }).catch((error: Error) => toast.error(error.message));
     api.getSubscription().then((s: any) => setCurrentTier(s.tier || "free")).catch(() => {});
   }, [loadAuth]);
+
+  useEffect(() => {
+    const page = pageRef.current;
+    const heading = headingRef.current;
+    if (!page || !heading) return;
+    const measure = () => {
+      const end = Math.round(heading.getBoundingClientRect().bottom - page.getBoundingClientRect().top);
+      setHeadingEnd(previous => (Math.abs(previous - end) > 1 ? end : previous));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(heading);
+    observer.observe(page);
+    return () => observer.disconnect();
+  }, [demoEnabled]);
 
   const checkout = async (planId: string) => {
     if (planId === "free") return;
@@ -64,8 +83,14 @@ export default function PricingPage() {
   };
 
   return (
-    <div className="relative isolate min-h-[100dvh] overflow-hidden bg-background text-foreground">
-      <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden="true">
+    <div ref={pageRef} className="relative isolate min-h-[100dvh] overflow-hidden bg-background text-foreground">
+      {/* The beam is centred and so is the title: keep it faint behind the text
+          and let it reach full strength in the gap above the cards. */}
+      <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden="true"
+        style={(() => {
+          const mask = `linear-gradient(to bottom, rgb(0 0 0 / 0.16) 0px, rgb(0 0 0 / 0.16) ${headingEnd - 10}px, #000 ${headingEnd + 80}px)`;
+          return { maskImage: mask, WebkitMaskImage: mask };
+        })()}>
         <LaserFlow surfaceRef={proCardRef} beamPosition={0.5} color="#3847ff" intensity={1.5} flare={1.2} spread={1.5} fog={0.2} dust={1} dpr={1.25} />
       </div>
       <div className="mx-auto max-w-5xl px-4 py-10 pb-20">
@@ -77,7 +102,7 @@ export default function PricingPage() {
           {t("backToChat")}
         </Link>
 
-        <div className="relative text-center mb-20 md:mb-32">
+        <div ref={headingRef} className="relative text-center mb-20 md:mb-32 [text-shadow:0_1px_14px_rgb(0_0_0/0.85)]">
           <p className="font-display text-xs uppercase tracking-[0.2em] text-primary mb-2">
             NKMZ
           </p>
