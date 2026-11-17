@@ -234,6 +234,23 @@
   }
 }
 
+/* Phone sidebar (a dialog): slides in from the left, backdrop fades. Radix
+   waits for the closing animation before removing the panel. */
+@keyframes sidebar-sheet-in { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes sidebar-sheet-out { from { transform: translateX(0); } to { transform: translateX(-100%); } }
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes overlay-out { from { opacity: 1; } to { opacity: 0; } }
+.sidebar-sheet[data-state="open"] { animation: sidebar-sheet-in 0.3s cubic-bezier(0.22, 1, 0.36, 1); }
+.sidebar-sheet[data-state="closed"] { animation: sidebar-sheet-out 0.22s ease-in forwards; }
+.sidebar-overlay[data-state="open"] { animation: overlay-in 0.25s ease-out; }
+.sidebar-overlay[data-state="closed"] { animation: overlay-out 0.22s ease-in forwards; }
+
+/* About NKMZ: the backdrop settles in and the title block rises on arrival. */
+@keyframes about-backdrop-in { from { opacity: 0; transform: scale(1.1); } to { opacity: 1; transform: scale(1); } }
+@keyframes about-rise { from { opacity: 0; transform: translateY(26px); } to { opacity: 1; transform: translateY(0); } }
+.about-backdrop { animation: about-backdrop-in 1.6s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.about-rise { animation: about-rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
 .animate-fade-up {
   animation: fade-up 0.45s ease-out both;
 }
@@ -282,7 +299,8 @@
 .hljs-strong { font-weight: 600; }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-fade-up, .animate-soft-pulse, .brand-shimmer, .thinking-dots span {
+  .animate-fade-up, .animate-soft-pulse, .brand-shimmer, .thinking-dots span,
+  .sidebar-sheet[data-state], .sidebar-overlay[data-state], .about-backdrop, .about-rise {
     animation: none;
   }
 }

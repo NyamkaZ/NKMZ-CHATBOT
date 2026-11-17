@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Loader2, Plus, PanelLeftClose, Search, X } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "@/lib/store";
@@ -30,6 +31,7 @@ export function Sidebar() {
     })));
   const [desktop, setDesktop] = useState<boolean | null>(null);
   const [kbOpen, setKbOpen] = useState(false);
+  const reduceMotion = useReducedMotion();
   const search = useRef<HTMLInputElement>(null);
   const close = useRef<HTMLButtonElement>(null);
   const mongolian = locale === "mn";
@@ -161,17 +163,33 @@ export function Sidebar() {
 
   return (
     <>
-      {desktop ? sidebarOpen && (
-        <aside id={panelId} aria-label={panelTitle}
-          className="relative z-40 flex h-full w-64 shrink-0 flex-col overflow-hidden border-r border-white/10 bg-[#080808] text-neutral-100 backdrop-blur-md xl:w-[272px]">
-          {contents}
-        </aside>
+      {desktop ? (
+        // The panel slides shut by collapsing its width, so the chat area
+        // grows into the space instead of jumping. The first paint is not animated.
+        <AnimatePresence initial={false}>
+          {sidebarOpen && (
+            <motion.aside key="sidebar" id={panelId} aria-label={panelTitle}
+              initial={{ width: 0, opacity: 0 }}
+              animate={{ width: "auto", opacity: 1 }}
+              exit={{ width: 0, opacity: 0 }}
+              transition={reduceMotion ? { duration: 0 } : {
+                width: { duration: 0.3, ease: [0.22, 1, 0.36, 1] },
+                opacity: { duration: 0.2, ease: "easeOut" },
+              }}
+              className="relative z-40 h-full shrink-0 overflow-hidden border-r border-white/10 bg-[#080808] text-neutral-100 backdrop-blur-md">
+              {/* Fixed-width inner panel: its contents never reflow while the edge moves. */}
+              <div className="flex h-full w-64 flex-col xl:w-[272px]">
+                {contents}
+              </div>
+            </motion.aside>
+          )}
+        </AnimatePresence>
       ) : (
         <Dialog.Root open={sidebarOpen} onOpenChange={setSidebarOpen}>
           <Dialog.Portal>
-            <Dialog.Overlay className="fixed inset-0 z-40 bg-black/60" />
+            <Dialog.Overlay className="sidebar-overlay fixed inset-0 z-40 bg-black/60" />
             <Dialog.Content id={panelId} aria-describedby={undefined}
-              className="fixed inset-y-0 left-0 z-50 flex w-[min(21rem,88vw)] flex-col overflow-hidden border-r border-white/10 bg-[#080808] pb-[env(safe-area-inset-bottom)] text-neutral-100 shadow-2xl outline-none"
+              className="sidebar-sheet fixed inset-y-0 left-0 z-50 flex w-[min(21rem,88vw)] flex-col overflow-hidden border-r border-white/10 bg-[#080808] pb-[env(safe-area-inset-bottom)] text-neutral-100 shadow-2xl outline-none"
               onOpenAutoFocus={e => { e.preventDefault(); close.current?.focus(); }}
               onCloseAutoFocus={e => { e.preventDefault(); focusSidebarToggle(); }}
               onEscapeKeyDown={e => {

@@ -46,16 +46,16 @@ export function AboutSite() {
     <div ref={root} className="dark relative isolate min-h-screen bg-black text-neutral-100 selection:bg-neutral-700">
       {/* One animated picture behind the whole page; it zooms as you scroll. */}
       <ScrollBackground />
-      <header className="absolute inset-x-0 top-0 z-20 flex items-center justify-between px-6 py-8 sm:px-12 lg:px-20">
+      <header className="about-rise absolute inset-x-0 top-0 z-20 flex items-center justify-between px-6 py-8 sm:px-12 lg:px-20" style={{ animationDelay: "0.1s" }}>
         <Link href="/" className="text-xs tracking-[0.15em] uppercase hover:text-white/60">{mn ? "Нүүр хуудас" : "Back to home"}</Link>
         <LanguageSwitch />
       </header>
       <main>
         <section className="relative flex min-h-[100svh] items-end overflow-hidden px-6 pb-20 pt-40 sm:px-12 lg:px-20">
           <div className="w-full">
-            <p className="mb-7 text-[10px] uppercase tracking-[0.35em] text-white/55">{mn ? "Бидний тухай" : "About the company"}</p>
-            <h1 className="font-display text-[clamp(3rem,12vw,11rem)] font-light leading-[0.95] tracking-[-0.065em]">NKMZ<span className="text-[#b84a50]">.</span></h1>
-            <div className="mt-12 flex flex-col justify-between gap-6 border-t border-white/20 pt-6 md:flex-row md:items-end">
+            <p className="about-rise mb-7 text-[10px] uppercase tracking-[0.35em] text-white/55" style={{ animationDelay: "0.25s" }}>{mn ? "Бидний тухай" : "About the company"}</p>
+            <h1 className="about-rise font-display text-[clamp(3rem,12vw,11rem)] font-light leading-[0.95] tracking-[-0.065em]" style={{ animationDelay: "0.4s" }}>NKMZ<span className="text-[#b84a50]">.</span></h1>
+            <div className="about-rise mt-12 flex flex-col justify-between gap-6 border-t border-white/20 pt-6 md:flex-row md:items-end" style={{ animationDelay: "0.6s" }}>
               <p className="max-w-md text-lg font-light leading-relaxed text-white/65">{mn ? "Мэдлэг, санаа, ажлыг нэгтгэх AI орон зай." : "An AI workspace for knowledge, ideas, and everyday work."}</p>
               <a href="#work" className="text-xs uppercase tracking-[0.2em] text-white/55 hover:text-white">{mn ? "Бүтээгдэхүүнтэй танилцах" : "Explore our product"} — 01</a>
             </div>

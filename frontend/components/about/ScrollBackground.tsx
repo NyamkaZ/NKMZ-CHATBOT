@@ -43,7 +43,7 @@ export function ScrollBackground() {
     };
   }, []);
   return (
-    <div className="pointer-events-none fixed inset-0 -z-10 overflow-hidden" aria-hidden="true">
+    <div className="about-backdrop pointer-events-none fixed inset-0 -z-10 overflow-hidden" aria-hidden="true">
       <div ref={scene} className="h-full w-full origin-[68%_38%] will-change-transform">
         <EtchedAccretion height="100%" interactive={false} renderScale={0.8} params={ORBIT_PARAMS} />
       </div>
