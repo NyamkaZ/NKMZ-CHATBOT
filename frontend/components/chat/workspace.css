@@ -14,7 +14,11 @@
   background: #000;
 }
 .workspace-orbit {
-  position: absolute;
+  /* Fixed to the window, not to the chat area: the chat area changes width
+     while the sidebar slides, and resizing a WebGL canvas clears it, which
+     showed as the backdrop flashing black. The sidebar simply covers its
+     left part. */
+  position: fixed;
   inset: 0;
   z-index: -1;
   overflow: hidden;

@@ -251,6 +251,11 @@
 .about-backdrop { animation: about-backdrop-in 1.6s cubic-bezier(0.22, 1, 0.36, 1) both; }
 .about-rise { animation: about-rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) both; }
 
+/* A short fade whenever the screen changes (see app/template.tsx). Opacity
+   only: a transform or filter here would re-anchor the fixed layers inside. */
+@keyframes page-enter { from { opacity: 0; } to { opacity: 1; } }
+.page-enter { animation: page-enter 0.4s ease-out both; }
+
 .animate-fade-up {
   animation: fade-up 0.45s ease-out both;
 }
@@ -300,7 +305,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-up, .animate-soft-pulse, .brand-shimmer, .thinking-dots span,
-  .sidebar-sheet[data-state], .sidebar-overlay[data-state], .about-backdrop, .about-rise {
+  .sidebar-sheet[data-state], .sidebar-overlay[data-state], .about-backdrop, .about-rise, .page-enter {
     animation: none;
   }
 }

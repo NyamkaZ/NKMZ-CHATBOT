@@ -20,7 +20,7 @@ import { useChatScroll } from "./useChatScroll";
 const EMPTY_MESSAGES: Message[] = [];
 // Black and white only: silver disk bands and white streaks on black.
 const ORBIT_PARAMS: Partial<AccretionParams> = {
-  center: [0.64, 0.43],
+  center: [0.7, 0.43],
   diskColor: "#bdbdbd",
   streakColor: "#ffffff",
   glowColor: "#ffffff",
