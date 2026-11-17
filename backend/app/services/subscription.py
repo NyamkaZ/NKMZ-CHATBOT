@@ -28,7 +28,6 @@ PLAN_META: Dict[str, Dict[str, Any]] = {
         "price_usd": 0,
         "daily_messages": settings.DAILY_MESSAGE_LIMIT,
         "features": [
-            "30 messages / day",
             "RAG knowledge base",
             "Guest try-before-login",
         ],
@@ -40,7 +39,6 @@ PLAN_META: Dict[str, Dict[str, Any]] = {
         "daily_messages": settings.PRO_DAILY_MESSAGE_LIMIT,
         "stripe_price_id": settings.STRIPE_PRO_PRICE_ID,
         "features": [
-            "200 messages / day",
             "Priority generation",
             "All AI personas",
             "Export chats",
@@ -53,7 +51,6 @@ PLAN_META: Dict[str, Dict[str, Any]] = {
         "daily_messages": settings.PREMIUM_DAILY_MESSAGE_LIMIT,
         "stripe_price_id": settings.STRIPE_PREMIUM_PRICE_ID,
         "features": [
-            "1000 messages / day",
             "Deep thinking mode",
             "Knowledge base uploads",
             "Early features",

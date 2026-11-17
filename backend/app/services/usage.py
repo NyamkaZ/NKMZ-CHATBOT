@@ -84,7 +84,7 @@ async def _reserve_usage(db: AsyncSession, user: User) -> Tuple[bool, int, int, 
             False,
             used,
             limit,
-            f"Daily limit of {limit} messages reached. Upgrade at /pricing or wait until midnight UTC.",
+            "Daily message limit reached. Upgrade at /pricing or wait until midnight UTC.",
             int((tomorrow - now).total_seconds()) + 1,
         )
 

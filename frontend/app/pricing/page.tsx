@@ -15,7 +15,6 @@ type Plan = {
   id: string;
   name: string;
   price_usd: number;
-  daily_messages: number;
   features: string[];
   stripe_enabled?: boolean;
 };
@@ -153,7 +152,7 @@ export default function PricingPage() {
                   )}
                 </div>
                 <p className="text-sm text-muted-foreground mb-4">
-                  {plan.daily_messages} {t("messagesPerDay")}
+                  {plan.id === "free" ? t("planUsageFree") : plan.id === "pro" ? t("planUsagePro") : plan.id === "premium" ? t("planUsagePremium") : ""}
                 </p>
                 <ul className="space-y-2 mb-8 flex-1">
                   {plan.features.map((f) => (

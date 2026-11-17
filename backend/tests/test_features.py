@@ -273,3 +273,15 @@ async def test_limit_errors_say_when_to_retry(env, monkeypatch):
     daily = await client.post("/api/v1/chats/send", json={"content": "over"}, headers=headers(spent))
     assert daily.status_code == 429
     assert 0 < int(daily.headers["retry-after"]) <= 24 * 3600 + 1
+
+
+async def test_public_plan_data_has_no_message_counts(env):
+    client, sessions, _ = env
+    plans = (await client.get("/api/v1/payments/plans")).json()
+    assert [plan["id"] for plan in plans["plans"]] == ["free", "pro", "premium"]
+    for plan in plans["plans"]:
+        assert set(plan) == {"id", "name", "price_usd", "features", "stripe_enabled"}
+        assert not any(character.isdigit() for feature in plan["features"] for character in feature)
+    user = await make_user(sessions)
+    mine = (await client.get("/api/v1/payments/subscription/me", headers=headers(user))).json()
+    assert "daily_messages" not in mine and mine["tier"] == "free"

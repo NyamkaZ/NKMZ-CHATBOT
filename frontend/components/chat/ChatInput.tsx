@@ -12,6 +12,7 @@ import { LiquidMetalButton } from "@/components/ui/liquid-metal-button";
 import ElectricBorder from "@/components/react-bits/ElectricBorder";
 import { composerDrafts, type ComposerDraft, type DraftKey } from "./composerDrafts";
 import { formatCountdown } from "@/lib/countdown";
+import { remainingPercent } from "@/lib/usage";
 import { useRemaining } from "./useRemaining";
 import styles from "./ChatInput.module.css";
 
@@ -177,9 +178,8 @@ function Composer() {
     ? (locale === "mn" ? "Дуугаар бичихийг зогсоох" : "Stop voice input")
     : t("voiceInput");
   const showUsage = usage !== null && usage.daily_limit < 999999;
-  const remainingPct = usage && usage.daily_limit > 0
-    ? Math.max(0, Math.min(100, usage.remaining / usage.daily_limit * 100))
-    : 0;
+  // People see their allowance as a percentage, never as message counts.
+  const remainingPct = usage ? remainingPercent(usage.remaining, usage.daily_limit) : 0;
 
   return (
     <div className={styles.dock}>
@@ -282,7 +282,7 @@ function Composer() {
           {showUsage && (
             <div className={styles.quota} data-low={remainingPct <= 10 || undefined}>
               <span aria-hidden="true" className={styles.meter}><i style={{ width: `${remainingPct}%` }} /></span>
-              <span>{usage.remaining} / {usage.daily_limit} {t("messagesLeft")}</span>
+              <span>{remainingPct}% {t("usageLeft")}</span>
               {usage.subscription_tier && usage.subscription_tier !== "free" && (
                 <span className={styles.tier}>{usage.subscription_tier}</span>
               )}

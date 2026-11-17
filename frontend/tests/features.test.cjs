@@ -192,3 +192,20 @@ test("an answer that arrives complete is typed out from its first character", as
     store.getState().resetSession();
   }
 });
+
+test("usage is reported as a percentage that never misstates the edges", () => {
+  const { remainingPercent, usedPercent } = require("../lib/usage.ts");
+  assert.equal(remainingPercent(30, 30), 100);
+  assert.equal(remainingPercent(28, 30), 93);
+  assert.equal(remainingPercent(15, 30), 50);
+  assert.equal(remainingPercent(0, 30), 0);
+  assert.equal(remainingPercent(-2, 30), 0);
+  assert.equal(remainingPercent(1, 1000), 1, "one message left is never shown as 0%");
+  assert.equal(remainingPercent(999, 1000), 99, "one message used is never shown as 100% left");
+  assert.equal(remainingPercent(5, 0), 0, "no allowance configured");
+  assert.equal(usedPercent(0, 30), 0);
+  assert.equal(usedPercent(2, 30), 7);
+  assert.equal(usedPercent(30, 30), 100);
+  assert.equal(usedPercent(45, 30), 100);
+  assert.equal(usedPercent(1, 1000), 1);
+});

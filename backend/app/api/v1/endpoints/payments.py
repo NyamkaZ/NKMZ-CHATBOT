@@ -38,9 +38,17 @@ class DemoUpgradeRequest(BaseModel):
 
 @router.get("/plans")
 async def list_plans():
+    # Only what the pricing page shows. The daily message counts are internal:
+    # people see their allowance as a percentage, not as a number.
     return {
         "plans": [
-            {**v, "id": k, "stripe_enabled": stripe_configured()}
+            {
+                "id": k,
+                "name": v["name"],
+                "price_usd": v["price_usd"],
+                "features": v["features"],
+                "stripe_enabled": stripe_configured(),
+            }
             for k, v in PLAN_META.items()
         ],
         "stripe_enabled": stripe_configured(),
@@ -55,7 +63,6 @@ async def my_subscription(user: Annotated[User, Depends(get_current_user)]):
     return {
         "tier": tier.value,
         "name": meta["name"],
-        "daily_messages": meta["daily_messages"],
         "expires_at": user.subscription_expires_at.isoformat()
         if user.subscription_expires_at
         else None,

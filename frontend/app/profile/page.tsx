@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { friendlyError } from "@/lib/errors";
 import { useChatStore } from "@/lib/store";
+import { usedPercent } from "@/lib/usage";
 import { LanguageSwitch } from "@/components/ui/LanguageSwitch";
 
 const utf8Length = (value: string) => new TextEncoder().encode(value).length;
@@ -101,7 +102,8 @@ export default function ProfilePage() {
   const signedIn = !!user && !user.is_guest;
   const initial = Array.from((user?.full_name?.trim() || user?.email || "?"))[0]?.toLocaleUpperCase(locale);
   const unlimited = !!usage && usage.daily_limit >= 999999;
-  const usedPct = usage && !unlimited && usage.daily_limit > 0 ? Math.min(100, (usage.used_today / usage.daily_limit) * 100) : 0;
+  // Shown as a percentage only; the message counts are not displayed.
+  const usedPct = usage && !unlimited ? usedPercent(usage.used_today, usage.daily_limit) : 0;
   const label = "mb-2 block text-xs font-medium text-neutral-400";
 
   return (
@@ -162,12 +164,12 @@ export default function ProfilePage() {
               <div className="flex items-baseline justify-between gap-4">
                 <h2 id="usage-title" className="text-sm font-medium">{mn ? "Өнөөдрийн хэрэглээ" : "Today’s usage"}</h2>
                 <p className="text-sm tabular-nums text-neutral-400">
-                  {!usage ? "—" : unlimited ? (mn ? "Хязгааргүй" : "Unlimited") : `${usage.used_today} / ${usage.daily_limit}`}
+                  {!usage ? "—" : unlimited ? (mn ? "Хязгааргүй" : "Unlimited") : `${usedPct}%`}
                 </p>
               </div>
               {usage && !unlimited && (
                 <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-neutral-800" role="progressbar"
-                  aria-labelledby="usage-title" aria-valuemin={0} aria-valuemax={usage.daily_limit} aria-valuenow={usage.used_today}>
+                  aria-labelledby="usage-title" aria-valuemin={0} aria-valuemax={100} aria-valuenow={usedPct}>
                   <div className="h-full rounded-full bg-neutral-300" style={{ width: `${usedPct}%` }} />
                 </div>
               )}
